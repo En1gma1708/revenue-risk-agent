@@ -1,0 +1,35 @@
+# Secrets — never commit
+.env
+*.env
+!.env.example
+
+# Internal-only working docs — not for public/judge reading.
+# PRD.md, NOVELTY.md, METRICS.md stay public: they're the judge-facing argument.
+# CLAUDE.md and DEVLOG.md are private working notes (AI-session orientation + raw build log).
+CLAUDE.md
+DEVLOG.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Node / frontend
+node_modules/
+dashboard/dist/
+dashboard/.vite/
+
+# Data / db (regenerable via generate_cases.py — keep the generator, not its output)
+*.db
+*.sqlite
+*.sqlite3
+cases.json
+attempt_history.json
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
