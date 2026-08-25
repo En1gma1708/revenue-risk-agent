@@ -6,8 +6,10 @@
 # Internal-only working docs — not for public/judge reading.
 # PRD.md, NOVELTY.md, METRICS.md stay public: they're the judge-facing argument.
 # CLAUDE.md and DEVLOG.md are private working notes (AI-session orientation + raw build log).
+# LEARNING_AND_INTERVIEW_PREP.md is personal study material, not project documentation.
 CLAUDE.md
 DEVLOG.md
+LEARNING_AND_INTERVIEW_PREP.md
 
 # Python
 __pycache__/

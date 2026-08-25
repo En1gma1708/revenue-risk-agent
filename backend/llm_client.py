@@ -15,12 +15,68 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional  # noqa: F401 (Any used by provider_state)
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Free-tier rate limits are a real, expected condition (see DEVLOG.md -- Gemini's free tier is as
+# low as 5 requests/minute on some models), not an edge case to ignore. Retry with backoff rather
+# than let a batch run crash on the first 429.
+MAX_RATE_LIMIT_RETRIES = 5
+DEFAULT_RETRY_DELAY_SECONDS = 15.0
+
+
+def _extract_retry_delay_seconds(error_message: str) -> Optional[float]:
+    """Best-effort parse of a provider's suggested retry delay from its error text (e.g. Gemini's
+    'Please retry in 37.475434769s.'). Falls back to None if not found."""
+    match = re.search(r"retry in (\d+(?:\.\d+)?)s", error_message, re.IGNORECASE)
+    return float(match.group(1)) + 1.0 if match else None
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    text = str(exc)
+    return "429" in text or "rate limit" in text.lower() or "RESOURCE_EXHAUSTED" in text or "quota" in text.lower()
+
+
+class DailyQuotaExhausted(Exception):
+    """Raised instead of retrying when the error is clearly a PER-DAY quota, not a per-minute
+    rate limit -- e.g. Gemini's free tier is 20 requests/day on some models (confirmed live,
+    see DEVLOG.md). Retrying a daily cap with a 60s backoff just burns the retry budget for no
+    reason; the caller should switch provider or stop, not wait."""
+
+
+def _is_daily_quota_error(exc: Exception) -> bool:
+    text = str(exc)
+    return "PerDay" in text or "per day" in text.lower() or "RequestsPerDay" in text
+
+
+def with_rate_limit_retry(fn):
+    def wrapped(*args, **kwargs):
+        for attempt in range(MAX_RATE_LIMIT_RETRIES):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:  # noqa: BLE001 - provider SDKs each raise their own exception types
+                if not _is_rate_limit_error(e):
+                    raise
+                if _is_daily_quota_error(e):
+                    raise DailyQuotaExhausted(
+                        f"Daily free-tier quota exhausted for this provider/model: {e}. "
+                        f"Retrying won't help until the quota resets -- switch LLM_PROVIDER "
+                        f"or wait for the daily reset."
+                    ) from e
+                if attempt == MAX_RATE_LIMIT_RETRIES - 1:
+                    raise
+                delay = _extract_retry_delay_seconds(str(e)) or DEFAULT_RETRY_DELAY_SECONDS
+                print(f"[llm_client] Rate limited (attempt {attempt + 1}/{MAX_RATE_LIMIT_RETRIES}), "
+                      f"waiting {delay:.1f}s before retry...")
+                time.sleep(delay)
+        raise RuntimeError("unreachable")  # loop always returns or raises
+    return wrapped
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +96,10 @@ class ToolUseBlock:
     id: str = ""
     name: str = ""
     input: dict = field(default_factory=dict)
+    # Opaque per-provider round-trip data (e.g. Gemini's thought_signature, required on
+    # multi-turn function-call parts or the API rejects the next turn). agent_loop.py never
+    # reads this; only the client that produced it reads it back on the next turn.
+    provider_state: Optional[Any] = None
 
 
 @dataclass
@@ -96,6 +156,7 @@ class GeminiClient(LLMClient):
         self.client = genai.Client(api_key=api_key)
         self.model = model
 
+    @with_rate_limit_retry
     def generate(self, system, messages, tools, max_tokens=4096) -> GenerateResult:
         from google.genai import types
 
@@ -115,9 +176,12 @@ class GeminiClient(LLMClient):
                 if isinstance(block, TextBlock):
                     parts.append(types.Part(text=block.text))
                 elif isinstance(block, ToolUseBlock):
-                    parts.append(types.Part(function_call=types.FunctionCall(
+                    part = types.Part(function_call=types.FunctionCall(
                         name=block.name, args=block.input,
-                    )))
+                    ))
+                    if block.provider_state is not None:
+                        part.thought_signature = block.provider_state
+                    parts.append(part)
                 elif isinstance(block, ToolResultBlock):
                     parts.append(types.Part(function_response=types.FunctionResponse(
                         name=block.tool_use_id, response={"result": block.content},
@@ -146,6 +210,10 @@ class GeminiClient(LLMClient):
                         id=part.function_call.name,   # Gemini has no call id; name doubles as one
                         name=part.function_call.name,
                         input=dict(part.function_call.args or {}),
+                        # Must be replayed on the next turn's matching function_call part, or
+                        # Gemini rejects the request with a 400 (missing thought_signature) --
+                        # see DEVLOG.md for the failure this fixes.
+                        provider_state=getattr(part, "thought_signature", None),
                     ))
                 elif getattr(part, "text", None):
                     out_blocks.append(TextBlock(text=part.text))
@@ -167,6 +235,7 @@ class GroqClient(LLMClient):
         self.client = Groq(api_key=os.environ["GROQ_API_KEY"])
         self.model = model
 
+    @with_rate_limit_retry
     def generate(self, system, messages, tools, max_tokens=4096) -> GenerateResult:
         return _generate_openai_compatible(self.client, self.model, system, messages, tools, max_tokens, provider_name="groq")
 
@@ -184,6 +253,7 @@ class OpenRouterClient(LLMClient):
         )
         self.model = model
 
+    @with_rate_limit_retry
     def generate(self, system, messages, tools, max_tokens=4096) -> GenerateResult:
         return _generate_openai_compatible(self.client, self.model, system, messages, tools, max_tokens, provider_name="openrouter")
 

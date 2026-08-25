@@ -50,6 +50,7 @@ class ProposedAction:
 @dataclass
 class AttemptHistory:
     attempts_this_cycle: list[datetime] = field(default_factory=list)   # execution times, this mandate cycle
+    records: list = field(default_factory=list)   # full AttemptRecord objects, for tool-facing detail
 
 
 # ---------------------------------------------------------------------------
