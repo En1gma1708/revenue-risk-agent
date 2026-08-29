@@ -7,9 +7,12 @@
 # PRD.md, NOVELTY.md, METRICS.md stay public: they're the judge-facing argument.
 # CLAUDE.md and DEVLOG.md are private working notes (AI-session orientation + raw build log).
 # LEARNING_AND_INTERVIEW_PREP.md is personal study material, not project documentation.
+# CONVERSATION_SUMMARY.md is a compressed context-restoration doc for AI sessions, not for judges.
 CLAUDE.md
 DEVLOG.md
 LEARNING_AND_INTERVIEW_PREP.md
+CONVERSATION_SUMMARY.md
+demo_shortlist.md
 
 # Python
 __pycache__/
