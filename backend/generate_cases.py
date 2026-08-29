@@ -19,6 +19,7 @@ import random
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from config import DEMO_TODAY, SEED
 from models import (
     AbandonmentStage,
     AttemptRecord,
@@ -38,12 +39,7 @@ from models import (
     decline_class_for,
 )
 
-SEED = 42
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-
-# "Today" for the simulated demo, fixed so PTP dates can be pre-dated relative to it without
-# needing a real wait or a simulated-clock UI control (see PRD.md SS11, decision already made).
-DEMO_TODAY = datetime(2026, 8, 24, 12, 0)
 
 FIRST_NAMES = ["Aarav", "Vihaan", "Priya", "Ananya", "Rohan", "Ishita", "Kabir", "Meera",
                "Aditya", "Sanya", "Karthik", "Neha", "Rahul", "Divya", "Arjun", "Pooja"]

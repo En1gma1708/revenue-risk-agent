@@ -150,10 +150,9 @@ class LLMClient:
 # ---------------------------------------------------------------------------
 
 class GeminiClient(LLMClient):
-    def __init__(self, model: str = "gemini-3.6-flash"):
+    def __init__(self, model: str = "gemini-3.6-flash", api_key: Optional[str] = None):
         from google import genai
-        api_key = os.environ["GEMINI_API_KEY"]
-        self.client = genai.Client(api_key=api_key)
+        self.client = genai.Client(api_key=api_key or os.environ["GEMINI_API_KEY"])
         self.model = model
 
     @with_rate_limit_retry
@@ -230,9 +229,9 @@ class GeminiClient(LLMClient):
 # ---------------------------------------------------------------------------
 
 class GroqClient(LLMClient):
-    def __init__(self, model: str = "openai/gpt-oss-120b"):
+    def __init__(self, model: str = "openai/gpt-oss-120b", api_key: Optional[str] = None):
         from groq import Groq
-        self.client = Groq(api_key=os.environ["GROQ_API_KEY"])
+        self.client = Groq(api_key=api_key or os.environ["GROQ_API_KEY"])
         self.model = model
 
     @with_rate_limit_retry
@@ -245,10 +244,10 @@ class GroqClient(LLMClient):
 # ---------------------------------------------------------------------------
 
 class OpenRouterClient(LLMClient):
-    def __init__(self, model: str = "nvidia/nemotron-3-super-120b-a12b:free"):
+    def __init__(self, model: str = "nvidia/nemotron-3-super-120b-a12b:free", api_key: Optional[str] = None):
         from openai import OpenAI
         self.client = OpenAI(
-            api_key=os.environ["OPENROUTER_API_KEY"],
+            api_key=api_key or os.environ["OPENROUTER_API_KEY"],
             base_url="https://openrouter.ai/api/v1",
         )
         self.model = model
@@ -334,15 +333,42 @@ def _generate_openai_compatible(client, model, system, messages, tools, max_toke
 
 
 # ---------------------------------------------------------------------------
-# Factory — reads LLM_PROVIDER from .env
+# Factory — reads LLM_PROVIDER from .env. Supports MULTIPLE free accounts per provider
+# (added 2026-08-29 after a full day of a single account's daily quota being the hard ceiling
+# on batch throughput -- see DEVLOG.md "we really have to improve this"). Each *_API_KEY env var
+# may hold a comma-separated list of keys, one per account: e.g.
+#   GROQ_API_KEY=key_from_account_1,key_from_account_2
+# get_llm_client(provider) still returns ONE client (the first/only account) for simple callers;
+# get_llm_clients_for_provider(provider) returns ALL configured accounts as separate clients, for
+# callers (run_batch.py) that want to round-robin across accounts to multiply real daily capacity.
 # ---------------------------------------------------------------------------
+
+_PROVIDER_CLASSES = {"gemini": GeminiClient, "groq": GroqClient, "openrouter": OpenRouterClient}
+_PROVIDER_ENV_VARS = {"gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY", "openrouter": "OPENROUTER_API_KEY"}
+
+
+def _keys_for_provider(provider: str) -> list[str]:
+    raw = os.environ.get(_PROVIDER_ENV_VARS[provider], "")
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    if not keys:
+        raise KeyError(f"No API key(s) configured for {provider} (set {_PROVIDER_ENV_VARS[provider]} in .env)")
+    return keys
+
 
 def get_llm_client(provider: Optional[str] = None) -> LLMClient:
     provider = (provider or os.environ.get("LLM_PROVIDER", "gemini")).lower()
-    if provider == "gemini":
-        return GeminiClient()
-    if provider == "groq":
-        return GroqClient()
-    if provider == "openrouter":
-        return OpenRouterClient()
-    raise ValueError(f"Unknown LLM_PROVIDER: {provider!r} (expected gemini | groq | openrouter)")
+    if provider not in _PROVIDER_CLASSES:
+        raise ValueError(f"Unknown LLM_PROVIDER: {provider!r} (expected gemini | groq | openrouter)")
+    key = _keys_for_provider(provider)[0]   # first configured account
+    return _PROVIDER_CLASSES[provider](api_key=key)
+
+
+def get_llm_clients_for_provider(provider: str) -> list[LLMClient]:
+    """Returns one client per configured account (comma-separated keys) for this provider, in
+    order. Use this instead of get_llm_client() when you want to spread load across multiple
+    free accounts of the SAME provider, not just across different providers."""
+    provider = provider.lower()
+    if provider not in _PROVIDER_CLASSES:
+        raise ValueError(f"Unknown provider: {provider!r} (expected gemini | groq | openrouter)")
+    cls = _PROVIDER_CLASSES[provider]
+    return [cls(api_key=key) for key in _keys_for_provider(provider)]

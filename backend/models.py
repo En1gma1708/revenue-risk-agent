@@ -246,3 +246,5 @@ class DecisionLogEntry(BaseModel):
     outcome: Optional[str] = None
     amount_at_risk_inr: float
     amount_recovered_inr: float = 0.0
+    provider: Optional[str] = None   # which LLM produced this decision (gemini/groq/openrouter);
+                                      # for reliability reporting per provider, see metrics.py

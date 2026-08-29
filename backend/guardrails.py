@@ -63,6 +63,7 @@ ACTION_TIER_DEFAULTS: dict[str, ActionTier] = {
     "send_payment_link": ActionTier.AUTONOMOUS,
     "schedule_retry": ActionTier.AUTONOMOUS,
     "offer_alternate_instrument": ActionTier.AUTONOMOUS,
+    "record_promise_to_pay": ActionTier.AUTONOMOUS,        # logging a commitment, not moving money
     "request_new_mandate": ActionTier.APPROVE_FIRST,      # customer-facing re-consent
     "discount_or_waiver": ActionTier.APPROVE_FIRST,        # money left on the table needs a human
     "escalate_to_collections": ActionTier.APPROVE_FIRST,   # B2B relationship risk
