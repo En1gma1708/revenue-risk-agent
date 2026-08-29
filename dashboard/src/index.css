@@ -1,0 +1,50 @@
+@import "tailwindcss";
+@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+
+@theme {
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Neutral scale — warm-tinted, not pure gray, so it reads intentional rather than
+     "default Tailwind slate." Kept subtle: this is a data-dense ops dashboard, not a
+     marketing page, so restraint matters more than personality here. */
+  --color-canvas: #fafaf9;
+  --color-surface: #ffffff;
+  --color-border-subtle: #ece9e4;
+  --color-ink: #1c1a17;
+  --color-ink-muted: #6f6a63;
+  --color-ink-faint: #a39d94;
+
+  /* One brand accent, restrained — a desaturated teal, deliberately not neon (same
+     direction as the --brand token in the sibling NeuralPath-AI project: clinical/
+     premium, not a SaaS gradient). Used for selection state and the primary CTA-ish
+     accents only — status semantics (recovered/escalated/blocked) stay on their own
+     desaturated red/amber/green below, not on brand. */
+  --color-brand: #0f6e66;
+  --color-brand-soft: #e4f1ef;
+
+  /* Status colors — desaturated on purpose. A full-saturation Tailwind emerald/amber/
+     rose reads as a consumer alert; this is a compliance instrument, so the palette
+     stays calm even when reporting a block or a failure. */
+  --color-good: #2f7a5c;
+  --color-good-soft: #e7f2ec;
+  --color-warn: #a3701f;
+  --color-warn-soft: #f5ecdc;
+  --color-bad: #b1493f;
+  --color-bad-soft: #f6e8e6;
+
+  --radius-card: 0.875rem;
+  --radius-pill: 999px;
+}
+
+body {
+  @apply antialiased;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-feature-settings: "cv11", "ss01";
+}
+
+::selection {
+  background: var(--color-brand-soft);
+  color: var(--color-brand);
+}
