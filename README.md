@@ -20,6 +20,14 @@ This project instead runs **one shared policy core** — the same tool set, the 
 the same reasoning loop — applied identically across all three. See [NOVELTY.md](NOVELTY.md) for the
 full argument, including which of the standard "agentic patterns" were deliberately not used and why.
 
+This isn't a default we didn't question: a genuine router-classifies → hands-off-to-3-surface-
+specialists architecture was separately built and verified live on the [Pydantic AI](https://ai.pydantic.dev/)
+framework ([backend/pydantic_agents.py](backend/pydantic_agents.py)) as a standalone comparison
+artifact, reusing the exact same guardrail engine every specialist calls into. It confirmed the
+single-agent choice is a deliberate tradeoff (compliance consistency, cross-surface customer-history
+visibility) rather than something never considered — see NOVELTY.md's orchestrator-worker row for the
+full reasoning.
+
 ## Architecture
 
 ```
@@ -85,7 +93,7 @@ cp ../.env.example ../.env   # fill in your free-tier keys — see .env.example 
 python generate_cases.py
 
 # 3. Run the full batch — this is where the actual agent reasoning happens
-python run_batch.py --providers gemini,groq,openrouter --resume
+python run_batch.py --resume   # defaults to groq,openrouter; pass --providers gemini,groq,openrouter to include Gemini
 
 # 4. Serve the API
 uvicorn app:app --reload
@@ -113,6 +121,59 @@ persisted incrementally, and `--resume` lets a run continue exactly where quota 
 dashboard's reliability panel reports the real clean-completion rate rather than masking failed
 generations as silent gaps.
 
+## What broke before release
+
+Not a hypothetical list — these are real bugs found and fixed during the build, kept here because
+"we tested it" means less than showing what testing actually caught.
+
+- **A hardcoded compliance rule was silently wrong.** `guardrails.py`'s NPCI retry-spacing check
+  indexed `NPCI_RETRY_SPACING_HOURS[len(attempts_this_cycle)]` instead of `[len(attempts_this_cycle) - 1]`
+  — an off-by-one that let a 28-hour retry gap pass a 72-hour minimum check. Caught by a unit test
+  asserting the boundary, not by manual review.
+- **One provider's schema quirk silently broke 100% of its batch share.** Gemini's function-calling API
+  rejects JSON Schema's `["string", "null"]` nullable-union syntax outright. Every Gemini-routed case in
+  a batch run failed — invisibly, because the failures looked like ordinary completions until someone
+  noticed the completion times were suspiciously instant (0.0s) rather than the multi-second calls a
+  real generation takes.
+- **An action tier defaulted to the wrong value.** `record_promise_to_pay` was missing from
+  `ACTION_TIER_DEFAULTS`, so it silently fell back to `APPROVE_FIRST` instead of the intended
+  `AUTONOMOUS`. Found by a unit test asserting the expected tier, not by reading the dispatch table.
+- **The system's own reliability tracking had a bug that hid real progress.** `get_cleanly_completed_case_ids()`
+  (`db.py`) and `compute_reliability_metrics()` (`metrics.py`) both judged a case's cleanliness against
+  its *entire* flat log history — so a case that failed once, days earlier, could never be recognized as
+  clean again even after a later attempt fully succeeded. Fixed in both places (found independently in
+  each — fixing one alone wasn't enough, since they could silently disagree with each other), now
+  covered by a cross-check test pinning the two implementations to the same answer. Quantified cost
+  while the bug existed: 42 cases had already succeeded at least once and were needlessly re-run anyway
+  — 227 wasted LLM calls against an already-scarce free-tier quota, worst case one payment-failure case
+  re-attempted 17 times after its first real success.
+- **Free-tier LLM quota is a real, load-bearing constraint, not a footnote.** A batch of ~95 multi-turn
+  cases is enough volume to hit daily request caps across all three configured providers simultaneously.
+  Multiple mitigations were tried and evaluated honestly against real data rather than assumed to work:
+  weighted provider scheduling (evidence-based, based on measured per-provider failure rates), a 2nd
+  Groq API key (found to add zero real capacity — both keys resolved to the same Groq organization ID,
+  confirmed by inspecting the org id embedded in the provider's own error payloads), and multi-day
+  `--resume` accumulation (the strategy that actually worked, moving the clean-case count up over
+  several days without any code change once the reliability-tracking bug above was fixed).
+
+## Does this scale beyond the demo batch?
+
+The case agent loop makes real per-case LLM calls, so its throughput is bound by whichever free-tier
+provider quota is available at the time — that's an honest external constraint (see above), not
+something worth claiming to have "solved."
+
+What's fair to claim: the rest of the pipeline — routing, the guardrail engine, DB persistence, and
+metrics computation — is entirely deterministic Python with no LLM dependency, and scales independently
+of that constraint. [backend/stress_test.py](backend/stress_test.py) generates a separate synthetic
+batch (never touching the real demo data in `data/`) and pushes it through that full non-LLM pipeline:
+**1,002 cases in ~200ms total** (routing: 2.8ms, guardrail evaluation + DB writes: 160ms, metrics
+computation: 41ms), with a non-degenerate tier distribution across all three tiers. Run it yourself:
+
+```bash
+cd backend
+python stress_test.py --n 334 --seed 999   # ~1,000 cases, writes to data_stress/ (gitignored)
+```
+
 ## Key files
 
 | File | What it is |
@@ -124,6 +185,7 @@ generations as silent gaps.
 | [backend/generate_cases.py](backend/generate_cases.py) | Synthetic data generator |
 | [backend/razorpay_client.py](backend/razorpay_client.py) | Real Razorpay Payments/Payment Links API wrapper |
 | [backend/run_batch.py](backend/run_batch.py) | Orchestrates the full batch run |
+| [backend/stress_test.py](backend/stress_test.py) | Architecture-scale test on a separate large synthetic batch (never touches `data/`) |
 | [backend/metrics.py](backend/metrics.py) | Headline/reliability/guardrail-ledger metric computations |
 | [backend/app.py](backend/app.py) | FastAPI endpoints the dashboard reads from |
 | [dashboard/](dashboard/) | React + Vite frontend |

@@ -1,5 +1,8 @@
 @import "tailwindcss";
-@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+/* Outfit/JetBrains Mono are loaded via <link> tags in index.html, not @import here -- Tailwind's
+   own PostCSS pipeline was silently dropping this @import from the production build (confirmed by
+   inspecting dist/assets/*.css: the font request was completely absent, not just reordered), so
+   the fonts were never actually loading despite the CSS looking correct in dev. */
 
 @theme {
   --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;

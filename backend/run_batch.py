@@ -3,10 +3,14 @@ Phase 3 — the full batch run. Loads the synthetic cases produced by generate_c
 them (severity scoring, plain code, per router.py), and runs each through the real case agent
 loop, persisting results incrementally to SQLite as they complete.
 
-Provider rotation: Gemini's free tier caps at 5 requests/minute (confirmed live, see DEVLOG.md
-2026-08-24), and a single case can take 5-8 requests -- hammering Gemini alone across ~95 cases
-would be slow and rate-limit-heavy. Round-robins across all 3 configured providers instead, so
-the batch actually completes in reasonable time using free-tier capacity that already exists.
+Provider rotation: originally round-robinned across all 3 free-tier providers, since Gemini's 5
+requests/minute cap (confirmed live, see DEVLOG.md 2026-08-24) made hammering it alone across ~95
+multi-request cases slow and rate-limit-heavy. As of 2026-08-30, Gemini is EXCLUDED from the
+default --providers list: measured on real batch data, it converted only ~2.5% of its attempts
+into clean cases (2 of 61) vs. Groq/OpenRouter's much higher conversion, and 100% of its failures
+were daily-quota-exhaustion 429s -- a structural free-tier limit, not transient flakiness (see
+DEVLOG.md 2026-08-30 "should we stop using gemini"). Still fully supported and can be re-added
+explicitly via --providers if worth spending its quota on again.
 
 Incremental persistence + per-case isolation: a batch this size will very likely hit at least one
 transient provider-side failure (already proven true once on Groq, see DEVLOG.md). Each case is
@@ -22,7 +26,8 @@ DB and only process what's left -- see db.get_cleanly_completed_case_ids() for e
 as "clean" (conservatively: a case only skips if NONE of its log entries are generation_error/
 max_iterations_exceeded artifacts).
 
-Run with: python backend/run_batch.py [--limit N] [--providers gemini,groq,openrouter] [--resume]
+Run with: python backend/run_batch.py [--limit N] [--providers groq,openrouter] [--resume]
+(pass --providers gemini,groq,openrouter explicitly to include Gemini again)
 """
 
 from __future__ import annotations
@@ -236,8 +241,16 @@ def run_batch(limit: int | None, provider_names: list[str], reset: bool = True, 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None, help="Only process the first N cases")
-    parser.add_argument("--providers", type=str, default="gemini,groq,openrouter",
-                        help="Comma-separated provider names to round-robin across")
+    parser.add_argument("--providers", type=str, default="groq,openrouter",
+                        help="Comma-separated provider names to round-robin across. Gemini is "
+                             "excluded from the default as of 2026-08-30 -- measured on real "
+                             "batch data, its free tier converted ~2.5%% of its attempts into "
+                             "clean cases (2 of 61) vs. Groq/OpenRouter's much higher share, and "
+                             "100%% of its failures were daily-quota-exhaustion 429s, not random "
+                             "flakiness -- a structural free-tier limit, not noise (see DEVLOG.md "
+                             "2026-08-30). Still fully supported via GeminiClient in llm_client.py "
+                             "and can be passed explicitly (--providers gemini,groq,openrouter) "
+                             "if its quota is ever worth spending again.")
     parser.add_argument("--no-reset", action="store_true", help="Don't wipe the DB before running")
     parser.add_argument("--resume", action="store_true",
                         help="Skip cases that already have a clean (non-error) result in the DB, "

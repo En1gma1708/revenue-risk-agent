@@ -356,7 +356,12 @@ def _keys_for_provider(provider: str) -> list[str]:
 
 
 def get_llm_client(provider: Optional[str] = None) -> LLMClient:
-    provider = (provider or os.environ.get("LLM_PROVIDER", "gemini")).lower()
+    # Default changed from "gemini" to "groq" 2026-08-30: measured on real batch data, Gemini
+    # converted only ~2.5% of its attempts into clean cases vs. Groq's much higher share, and
+    # 100% of its failures were daily-quota-exhaustion 429s -- a structural free-tier limit, not
+    # noise (see DEVLOG.md 2026-08-30 "should we stop using gemini"). Gemini is still fully
+    # supported; pass provider="gemini" or set LLM_PROVIDER=gemini explicitly to use it.
+    provider = (provider or os.environ.get("LLM_PROVIDER", "groq")).lower()
     if provider not in _PROVIDER_CLASSES:
         raise ValueError(f"Unknown LLM_PROVIDER: {provider!r} (expected gemini | groq | openrouter)")
     key = _keys_for_provider(provider)[0]   # first configured account

@@ -1,3 +1,4 @@
+import { SlidingNumber } from "./SlidingNumber"
 import type { BaselineComparison, HeadlineMetrics } from "../types"
 
 function formatInr(amount: number): string {
@@ -10,7 +11,7 @@ function formatInr(amount: number): string {
 
 interface StatProps {
   label: string
-  value: string
+  amount: number
   accent: "neutral" | "good" | "warn" | "bad"
 }
 
@@ -21,7 +22,7 @@ const ACCENT_COLOR: Record<StatProps["accent"], string> = {
   bad: "var(--color-bad)",
 }
 
-function Stat({ label, value, accent }: StatProps) {
+function Stat({ label, amount, accent }: StatProps) {
   return (
     <div className="flex flex-col gap-1.5">
       <span
@@ -30,9 +31,12 @@ function Stat({ label, value, accent }: StatProps) {
       >
         {label}
       </span>
-      <span className="text-2xl font-semibold tabular-nums" style={{ color: ACCENT_COLOR[accent] }}>
-        {value}
-      </span>
+      <SlidingNumber
+        value={amount}
+        format={formatInr}
+        className="text-2xl font-semibold tabular-nums"
+        style={{ color: ACCENT_COLOR[accent] }}
+      />
     </div>
   )
 }
@@ -48,10 +52,10 @@ export function MetricsBar({ metrics, baseline }: { metrics: HeadlineMetrics; ba
       style={{ background: "var(--color-surface)", boxShadow: "0 1px 2px rgba(28,26,23,0.04), 0 1px 12px rgba(28,26,23,0.03)" }}
     >
       <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
-        <Stat label="At risk" value={formatInr(metrics.amount_at_risk_inr)} accent="neutral" />
-        <Stat label="Recovered" value={formatInr(metrics.amount_recovered_inr)} accent="good" />
-        <Stat label="Escalated" value={formatInr(metrics.amount_escalated_inr)} accent="warn" />
-        <Stat label="Blocked by policy" value={formatInr(metrics.amount_blocked_inr)} accent="bad" />
+        <Stat label="At risk" amount={metrics.amount_at_risk_inr} accent="neutral" />
+        <Stat label="Recovered" amount={metrics.amount_recovered_inr} accent="good" />
+        <Stat label="Escalated" amount={metrics.amount_escalated_inr} accent="warn" />
+        <Stat label="Blocked by policy" amount={metrics.amount_blocked_inr} accent="bad" />
       </div>
       <div
         className="mt-5 flex items-center gap-3 border-t pt-4 text-sm"
@@ -59,7 +63,10 @@ export function MetricsBar({ metrics, baseline }: { metrics: HeadlineMetrics; ba
       >
         <span>{metrics.case_count} cases in batch</span>
         <span className="h-1 w-1 rounded-full" style={{ background: "var(--color-ink-faint)" }} />
-        <span>{agentRate.toFixed(1)}% recovery rate</span>
+        <span className="inline-flex items-baseline">
+          <SlidingNumber value={agentRate} format={(n) => `${n.toFixed(1)}%`} />
+          <span className="ml-1">recovery rate</span>
+        </span>
       </div>
 
       {baseline && baselineRate !== null && (

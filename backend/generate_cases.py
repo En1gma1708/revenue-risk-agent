@@ -14,6 +14,7 @@ expose that data even in test mode -- this is a platform constraint, not a short
 
 from __future__ import annotations
 
+import argparse
 import json
 import random
 from datetime import date, datetime, timedelta
@@ -242,7 +243,11 @@ def generate_receivables(rng: random.Random, n: int) -> list[Case]:
         if ptp_roll < 0.5:
             # PTP already made, date in the simulated past relative to DEMO_TODAY -- lets the
             # agent's "check back on promised date" logic run immediately at batch time.
-            made_days_ago = rng.randint(3, days_overdue)
+            # days_overdue can be as low as 1 (from the rng.randint(1, 15) branch above), so the
+            # lower bound must never exceed it -- found via a 1,000-case stress-scale run
+            # (2026-08-30) that a 25-case batch never happened to trigger by chance: min(3, ...)
+            # keeps this valid instead of crashing on ValueError: empty range.
+            made_days_ago = rng.randint(min(3, days_overdue), days_overdue)
             promised_offset = rng.randint(-10, 5)   # negative = promised date already passed
             made_at = DEMO_TODAY - timedelta(days=made_days_ago)
             promised_date = (DEMO_TODAY + timedelta(days=promised_offset)).date()
@@ -291,8 +296,19 @@ def _round_to_minute(dt: datetime) -> datetime:
     return dt.replace(second=0, microsecond=0)
 
 
-def main(n_payment=40, n_checkout=30, n_receivable=25):
-    rng = random.Random(SEED)
+def main(n_payment=40, n_checkout=30, n_receivable=25, out_dir: Path | None = None, seed: int | None = None):
+    """
+    out_dir, if given, redirects output away from data/cases.json + data/attempt_history.json --
+    the REAL demo dataset every other part of this project (agent_loop, run_batch, the dashboard)
+    reads from. This is what makes a large-N architecture/throughput stress run safe to generate
+    without any risk of silently overwriting the curated 95-case demo batch. Default (out_dir=None)
+    is unchanged from before -- writes to data/, exactly as it always has.
+
+    seed, if given, overrides config.SEED -- lets a stress run use a different seed than the demo
+    batch's, so it's structurally obvious (different case_id numbering, different randomization)
+    which file is which even if someone loses track of which directory they're looking at.
+    """
+    rng = random.Random(seed if seed is not None else SEED)
 
     payment_cases, attempts = generate_payment_failures(rng, n_payment)
     checkout_cases = generate_checkout_abandonments(rng, n_checkout)
@@ -303,10 +319,11 @@ def main(n_payment=40, n_checkout=30, n_receivable=25):
         c.created_at = _round_to_minute(c.created_at)
     rng.shuffle(all_cases)
 
-    DATA_DIR.mkdir(exist_ok=True)
+    target_dir = out_dir or DATA_DIR
+    target_dir.mkdir(exist_ok=True, parents=True)
 
-    cases_path = DATA_DIR / "cases.json"
-    attempts_path = DATA_DIR / "attempt_history.json"
+    cases_path = target_dir / "cases.json"
+    attempts_path = target_dir / "attempt_history.json"
 
     cases_path.write_text(
         json.dumps([c.model_dump(mode="json") for c in all_cases], indent=2, default=_json_default),
@@ -328,4 +345,25 @@ def main(n_payment=40, n_checkout=30, n_receivable=25):
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Generate synthetic cases. Default (no args) writes exactly what it always "
+                     "has, to data/ -- the real demo batch. Pass --out-dir for a separate stress-"
+                     "test dataset that can never collide with it."
+    )
+    parser.add_argument("--n-payment", type=int, default=40)
+    parser.add_argument("--n-checkout", type=int, default=30)
+    parser.add_argument("--n-receivable", type=int, default=25)
+    parser.add_argument("--out-dir", type=str, default=None,
+                         help="Write to this directory instead of data/. Use this for any run "
+                              "that isn't the curated demo batch.")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="Override config.SEED (e.g. for a differently-seeded stress batch).")
+    args = parser.parse_args()
+
+    main(
+        n_payment=args.n_payment,
+        n_checkout=args.n_checkout,
+        n_receivable=args.n_receivable,
+        out_dir=Path(args.out_dir) if args.out_dir else None,
+        seed=args.seed,
+    )

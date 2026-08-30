@@ -114,3 +114,31 @@ export interface CaseTraceResponse {
   case: Case
   trace: DecisionLogEntry[]
 }
+
+// Mirrors backend/custom_case.py's CustomCaseInput -- the simplified, form-friendly shape a
+// visitor fills in for a live submission (narrower than the full Case schema).
+export interface CustomCaseInput {
+  surface: Surface
+  customer_name: string
+  amount_inr: number
+  provider?: string
+
+  instrument_type?: "card" | "upi" | "netbanking" | "other"
+  error_reason?: string
+  attempt_number?: number
+
+  items?: string[]
+  abandonment_stage?: "otp_entry" | "instrument_select" | "bank_redirect" | "review"
+  device?: "mobile_web" | "desktop" | "app"
+  minutes_since_abandon?: number
+
+  days_overdue?: number
+  contact_channel_pref?: "email" | "sms" | "call" | "whatsapp"
+}
+
+export interface BulkCaseResult {
+  row: number
+  customer_name: string
+  case_id: string | null
+  error: string | null
+}

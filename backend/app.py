@@ -14,11 +14,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from baseline import load_cases as load_baseline_cases
 from baseline import run_naive_baseline
+from bulk_upload import parse_upload, run_bulk
+from custom_case import CustomCaseInput, run_custom_case
 from db import get_connection, init_db, load_all_cases, load_all_decision_log_entries
 from guardrails import GUARDRAILS
 from metrics import (
@@ -114,6 +116,45 @@ def trigger_batch_run(limit: Optional[int] = None, providers: str = "gemini,groq
     provider_names = [p.strip() for p in providers.split(",") if p.strip()]
     stats = run_batch(limit=limit, provider_names=provider_names, reset=True)
     return {"stats": stats}
+
+
+@app.post("/cases/custom/run")
+def submit_custom_case(payload: CustomCaseInput):
+    """
+    Runs a visitor-submitted case through the real agent loop, live -- the fix for "as far as
+    anyone else knows, this is just a script": there is no way to tell a genuinely interactive
+    agent apart from a replayed batch without actually letting someone feed it a new case and
+    watch it decide in real time. Synchronous (a few seconds to ~1-2 minutes depending on how
+    many turns the agent needs) -- acceptable for one interactive submission at a time, same
+    reasoning as /batch/run being synchronous for a full batch.
+    """
+    try:
+        case_id = run_custom_case(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except KeyError as e:
+        # get_llm_client raises KeyError if the requested provider has no API key configured
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"case_id": case_id}
+
+
+@app.post("/cases/custom/bulk")
+async def submit_bulk_cases(file: UploadFile = File(...)):
+    """
+    The multi-case version of /cases/custom/run -- upload a .csv or .xlsx of cases (matching
+    bulk_upload.COLUMNS; the dashboard serves a ready-made example at /sample_cases.xlsx, a
+    static file in dashboard/public/) and each row is run through the real agent loop, one at a
+    time. Capped at bulk_upload.MAX_ROWS to protect shared free-tier quota from a single
+    oversized upload.
+    """
+    content = await file.read()
+    try:
+        inputs = parse_upload(file.filename or "upload", content)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    results = run_bulk(inputs)
+    return {"results": results}
 
 
 @app.get("/health")

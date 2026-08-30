@@ -6,3 +6,11 @@ google-genai==1.75.0
 groq==0.37.1
 openai==3.3.1
 razorpay==2.0.1
+openpyxl==3.1.5
+python-multipart==0.0.32
+# google-genai extra deliberately excluded: pydantic-ai-slim 2.36.0 requires google-genai>=2.18.0,
+# which conflicts with the google-genai==1.75.0 pin above (llm_client.GeminiClient's dependency).
+# Not a real loss right now -- Gemini is already deprioritized (see CLAUDE.md) and unused by the
+# pydantic_agents.py PoC's default provider. Add google-genai>=2.18.0 + [google] here if Gemini
+# support in the Pydantic AI system is ever actually needed.
+pydantic-ai-slim[groq,openai]==2.36.0
