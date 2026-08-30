@@ -160,6 +160,25 @@ def test_check_customer_history_empty_when_no_siblings(tools):
 # propose_intervention / execute_action
 # ---------------------------------------------------------------------------
 
+def test_propose_intervention_survives_non_isoformat_time_string(tools):
+    """Regression test for a real bug found live 2026-08-30 (CART-0020 during a batch run): the
+    model passed the literal string "now" as target_time instead of a real ISO timestamp, and
+    propose_intervention crashed with an unhandled ValueError because it called
+    datetime.fromisoformat() directly instead of going through agent_loop.py's safe _parse_dt
+    wrapper (which this file's version now also uses). A malformed time string must degrade to
+    None, not crash the whole case."""
+    case = make_payment_case()
+    deps = CaseDeps(case=case, history=AttemptHistory(), all_cases=[case])
+
+    result = json.loads(call(tools, "propose_intervention", deps, action_type="schedule_retry",
+                              amount=1500.0, reasoning="r", channel="upi_autopay",
+                              target_time="now", notify_time="also not a real timestamp"))
+
+    assert result["recorded"] is True
+    assert deps.proposed.target_time is None
+    assert deps.proposed.notify_time is None
+
+
 def test_execute_action_without_proposal_errors(tools):
     case = make_payment_case()
     deps = CaseDeps(case=case, history=AttemptHistory(), all_cases=[case])

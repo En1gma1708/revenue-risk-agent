@@ -101,6 +101,23 @@ def _build_weighted_account_schedule(account_clients: list[tuple[str, object]]) 
     return schedule or account_clients
 
 
+def find_ptp_due_cases(cases: list[Case], today) -> list[Case]:
+    """Extracted 2026-08-30 into a standalone, testable function -- the inline version of this
+    filter had a real bug (fixed the same day, see DEVLOG.md): it filtered over the --resume-
+    shrunk case list instead of the FULL batch, so a case already marked clean by an earlier run
+    was silently never re-checked for a due promise-to-pay, even with a promise date that had
+    genuinely arrived. Callers must pass the FULL case list (e.g. all_cases_for_context), not a
+    --resume-filtered one."""
+    return [
+        c for c in cases
+        if c.surface == Surface.OVERDUE_RECEIVABLE
+        and c.receivable_details
+        and c.receivable_details.ptp
+        and c.receivable_details.ptp.status == PTPStatus.PENDING
+        and c.receivable_details.ptp.promised_date <= today
+    ]
+
+
 def run_batch(limit: int | None, provider_names: list[str], reset: bool = True, resume: bool = False) -> dict:
     conn = get_connection()
 
@@ -193,14 +210,12 @@ def run_batch(limit: int | None, provider_names: list[str], reset: bool = True, 
     # main loop above already evaluated them once with the PTP visible in get_case_context --
     # this second pass specifically targets promises that have crossed their due date, which is
     # the moment a real decision (kept vs missed) actually needs to be made.
-    ptp_due_cases = [
-        c for c in cases
-        if c.surface == Surface.OVERDUE_RECEIVABLE
-        and c.receivable_details
-        and c.receivable_details.ptp
-        and c.receivable_details.ptp.status == PTPStatus.PENDING
-        and c.receivable_details.ptp.promised_date <= DEMO_TODAY.date()
-    ]
+    #
+    # Filters over all_cases_for_context (the FULL batch), not `cases` -- see find_ptp_due_cases's
+    # own docstring for the bug this guards against (found live 2026-08-30). all_cases_for_context
+    # is safe to re-check every run: it's freshly reloaded from data/cases.json each time (always
+    # PENDING in the source data), not mutated by the DB.
+    ptp_due_cases = find_ptp_due_cases(all_cases_for_context, DEMO_TODAY.date())
 
     if ptp_due_cases:
         print(f"\nRe-evaluating {len(ptp_due_cases)} case(s) with a promise-to-pay due as of "

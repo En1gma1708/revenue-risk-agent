@@ -42,9 +42,14 @@ CREATE INDEX IF NOT EXISTS idx_cases_surface ON cases(surface);
 """
 
 
-def get_connection() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
+    """db_path: override the default DB file -- used by run_batch_multiagent.py (2026-08-30) to
+    keep the multi-agent system's batch progress in a separate file from the proven single-agent
+    system's, so Gate 3's validated clean-case count is never ambiguous with the existing 61+/95.
+    Every function below still works unchanged either way -- they all just take the resulting
+    sqlite3.Connection, never DB_PATH directly."""
+    db_path.parent.mkdir(exist_ok=True)
+    conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 

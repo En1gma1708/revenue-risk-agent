@@ -87,17 +87,21 @@ def _next_key(env_var: str) -> str:
     return keys[i]
 
 
-def resolve_model(provider: str):
+def resolve_model(provider: str, api_key: Optional[str] = None):
+    """api_key: explicit key to use for this call, e.g. one account from a batch runner's own
+    weighted account schedule (see run_batch_multiagent.py). When omitted, falls back to this
+    module's own internal round-robin (_next_key) -- kept for the standalone single-case demo at
+    the bottom of this file, which has no external scheduler driving account selection."""
     provider = provider.lower()
     if provider == "groq":
         # Model id matches llm_client.GroqClient's default -- confirmed working against the real
         # account (llama-3.3-70b-versatile is deprecated/unavailable on this account as of
         # 2026-08-30, found live when this file was first run).
-        return GroqModel("openai/gpt-oss-120b", provider=GroqProvider(api_key=_next_key("GROQ_API_KEY")))
+        return GroqModel("openai/gpt-oss-120b", provider=GroqProvider(api_key=api_key or _next_key("GROQ_API_KEY")))
     if provider == "gemini":
-        return GoogleModel("gemini-2.0-flash", provider=GoogleProvider(api_key=_next_key("GEMINI_API_KEY")))
+        return GoogleModel("gemini-2.0-flash", provider=GoogleProvider(api_key=api_key or _next_key("GEMINI_API_KEY")))
     if provider == "openrouter":
-        return OpenRouterModel("openai/gpt-oss-120b", provider=OpenRouterProvider(api_key=_next_key("OPENROUTER_API_KEY")))
+        return OpenRouterModel("openai/gpt-oss-120b", provider=OpenRouterProvider(api_key=api_key or _next_key("OPENROUTER_API_KEY")))
     raise ValueError(f"Unknown provider: {provider!r} (expected gemini | groq | openrouter)")
 
 
@@ -120,6 +124,22 @@ class CaseDeps:
 # Shared tools -- registered on EVERY specialist agent below, identical logic to agent_loop.py's
 # dispatch_tool cases of the same name, calling the same guardrails.py functions.
 # ---------------------------------------------------------------------------
+
+def _parse_dt(s: Optional[str]) -> Optional[datetime]:
+    """Ported from agent_loop.py's identical helper -- models sometimes pass a non-ISO sentinel
+    like "now" instead of a real timestamp for target_time/notify_time (found live 2026-08-30,
+    CART-0020 crashed propose_intervention with an unhandled ValueError during a real batch run
+    because this file called datetime.fromisoformat() directly instead of going through this safe
+    wrapper the way agent_loop.py already did). Falls back to None -- a missing/malformed time is
+    still a valid ProposedAction shape (e.g. execute_action's RBI pre-debit-notice check already
+    treats a missing target_time/notify_time as a violation on its own, not a crash)."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
 
 def _register_case_tools(agent: Agent) -> None:
     @agent.tool
@@ -184,8 +204,8 @@ def _register_case_tools(agent: Agent) -> None:
         execute_action enforces policy regardless of what you propose here."""
         ctx.deps.proposed = ProposedAction(
             action_type=action_type, channel=channel, amount=amount,
-            target_time=datetime.fromisoformat(target_time) if target_time else None,
-            notify_time=datetime.fromisoformat(notify_time) if notify_time else None,
+            target_time=_parse_dt(target_time),
+            notify_time=_parse_dt(notify_time),
         )
         ctx.deps.proposed.reasoning = reasoning  # type: ignore[attr-defined]
         return json.dumps({"recorded": True, "note": "Call execute_action to attempt this."})
@@ -365,10 +385,18 @@ def _make_router(model) -> Agent:
     )
 
 
-def run_case_via_orchestrator(case: Case, history: AttemptHistory, provider: str, all_cases: Optional[list[Case]] = None):
+def run_case_via_orchestrator(
+    case: Case, history: AttemptHistory, provider: str,
+    all_cases: Optional[list[Case]] = None, api_key: Optional[str] = None,
+):
     """Full pipeline: router classifies -> hands off to the matching specialist -> specialist runs
-    its full investigate/decide/execute loop. Returns (routing_decision, list[DecisionLogEntry])."""
-    model = resolve_model(provider)
+    its full investigate/decide/execute loop. Returns (routing_decision, list[DecisionLogEntry]).
+
+    api_key: explicit account key for this case, passed straight through to resolve_model -- lets
+    a batch runner assign accounts via its own weighted schedule (see run_batch_multiagent.py)
+    instead of relying on this module's internal round-robin, which has no visibility into what a
+    batch runner has already assigned to other concurrent/prior cases."""
+    model = resolve_model(provider, api_key=api_key)
 
     router = _make_router(model)
     event_description = (
