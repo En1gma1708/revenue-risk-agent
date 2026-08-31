@@ -69,7 +69,11 @@ export function MetricsBar({ metrics, baseline }: { metrics: HeadlineMetrics; ba
         </span>
       </div>
 
-      {baseline && baselineRate !== null && (
+      {/* Comparing a 0%-recovery empty batch against a baseline computed from a separate demo
+          dataset produces a nonsensical negative "lift" (e.g. "-9.8 pts") that reads as the agent
+          underperforming, when really there's just no data yet. Redesign-skill audit finding,
+          2026-08-30 polish pass. */}
+      {baseline && baselineRate !== null && metrics.case_count > 0 && (
         <div className="mt-4 rounded-xl p-4" style={{ background: "var(--color-canvas)" }}>
           <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
             <span style={{ color: "var(--color-ink-muted)" }}>

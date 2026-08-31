@@ -3,7 +3,8 @@ FastAPI backend for the dashboard (Phase 5). Four endpoints per PRD.md SS9:
   - POST /batch/run       -- trigger a batch run (wraps run_batch.run_batch)
   - GET  /cases           -- the batch table (filterable by surface)
   - GET  /cases/{id}/trace -- one case's full DecisionLogEntry timeline
-  - GET  /metrics         -- headline + per-surface + guardrail ledger + agent-quality metrics
+  - GET  /metrics         -- headline + per-surface + guardrail ledger + agent-quality + checker
+    (reflection-agent) metrics
 
 Deliberately thin: all real logic (metrics computation, guardrail rules, the agent loop) lives
 in their own modules and is unit-testable independent of the web framework. This file is just
@@ -25,6 +26,7 @@ from db import MULTIAGENT_DB_PATH, get_connection, init_db, load_all_cases, load
 from guardrails import GUARDRAILS
 from metrics import (
     compute_agent_quality_metrics,
+    compute_checker_metrics,
     compute_guardrail_ledger,
     compute_headline_metrics,
     compute_per_surface_metrics,
@@ -106,6 +108,7 @@ def get_metrics():
         "agent_quality": compute_agent_quality_metrics(entries),
         "reliability": compute_reliability_metrics(cases, entries),
         "provider_reliability": compute_provider_reliability(entries),
+        "checker": compute_checker_metrics(cases, entries),
         "guardrail_rules": [
             {"rule_id": r.rule_id, "description": r.description, "tier_on_violation": r.tier_on_violation.value}
             for r in GUARDRAILS

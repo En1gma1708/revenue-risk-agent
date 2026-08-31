@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom"
+import { Reveal } from "../components/Reveal"
 import { TopNav } from "../components/TopNav"
 
 interface Bug {
@@ -69,11 +70,11 @@ const QUOTA_TIMELINE: { date: string; text: string }[] = [
   { date: "Aug 30", text: "Checked the real per-provider numbers before deciding anything: of 61 attributed clean cases, Groq produced 25, OpenRouter 3, Gemini only 2 — and 100% of Gemini's 74 failures were 429 daily-quota errors, not transient flakiness. Switched the default provider from Gemini to Groq everywhere, including the live-submission feature, so a visitor's first attempt isn't ~92% likely to land on the already-exhausted option." },
 ]
 
-function Card({ children }: { children: React.ReactNode }) {
+function Card({ children, delayMs = 0 }: { children: React.ReactNode; delayMs?: number }) {
   return (
-    <div className="rounded-[var(--radius-card)] p-5" style={{ background: "var(--color-surface)" }}>
+    <Reveal delayMs={delayMs} className="rounded-[var(--radius-card)] p-5" style={{ background: "var(--color-surface)" }}>
       {children}
-    </div>
+    </Reveal>
   )
 }
 
@@ -104,8 +105,8 @@ export default function WhatBroke() {
         </p>
 
         <div className="mt-8 flex flex-col gap-4">
-          {BUGS.map((bug) => (
-            <Card key={bug.title}>
+          {BUGS.map((bug, i) => (
+            <Card key={bug.title} delayMs={i * 80}>
               <p className="text-base font-semibold" style={{ color: "var(--color-ink)" }}>
                 {bug.title}
               </p>

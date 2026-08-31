@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom"
 import type { Case, CaseStatus, Surface } from "../types"
 
 const SURFACE_LABEL: Record<Surface, string> = {
@@ -54,6 +55,11 @@ function formatInr(amount: number): string {
 
 interface CaseTableProps {
   cases: Case[]
+  /** Total cases in the batch before any surface filter is applied -- lets the empty state
+      distinguish "the whole batch is genuinely empty" from "this filter matched nothing," which
+      `cases.length === 0` alone can't tell apart. Defaults to `cases.length` so existing callers
+      that don't pass it keep the old (filter-only) behavior. */
+  totalCases?: number
   selectedSurface: Surface | "all"
   onSelectSurface: (surface: Surface | "all") => void
   onSelectCase: (caseId: string) => void
@@ -62,7 +68,8 @@ interface CaseTableProps {
 
 const SURFACES: Surface[] = ["payment_failure", "checkout_abandonment", "overdue_receivable"]
 
-export function CaseTable({ cases, selectedSurface, onSelectSurface, onSelectCase, selectedCaseId }: CaseTableProps) {
+export function CaseTable({ cases, totalCases, selectedSurface, onSelectSurface, onSelectCase, selectedCaseId }: CaseTableProps) {
+  const batchIsEmpty = (totalCases ?? cases.length) === 0
   return (
     <div
       className="rounded-[var(--radius-card)]"
@@ -140,7 +147,22 @@ export function CaseTable({ cases, selectedSurface, onSelectSurface, onSelectCas
             })}
           </tbody>
         </table>
-        {cases.length === 0 && (
+        {cases.length === 0 && batchIsEmpty && (
+          <div className="flex flex-col items-center gap-2 px-8 py-14 text-center">
+            <p className="text-sm font-medium" style={{ color: "var(--color-ink-muted)" }}>
+              No cases in the batch yet
+            </p>
+            <p className="max-w-sm text-xs leading-relaxed" style={{ color: "var(--color-ink-faint)" }}>
+              Run <code className="font-mono">python backend/run_batch.py</code> to populate the
+              demo dataset, or submit a single case yourself on the{" "}
+              <Link to="/try" style={{ color: "var(--color-brand)" }}>
+                Try your own case
+              </Link>{" "}
+              page.
+            </p>
+          </div>
+        )}
+        {cases.length === 0 && !batchIsEmpty && (
           <div className="p-8 text-center text-sm" style={{ color: "var(--color-ink-faint)" }}>
             No cases match this filter.
           </div>

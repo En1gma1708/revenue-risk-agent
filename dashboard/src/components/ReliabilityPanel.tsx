@@ -21,6 +21,10 @@ function rateColor(rate: number, invert = false): string {
 
 export function ReliabilityPanel({ reliability, providerReliability }: ReliabilityPanelProps) {
   const providers = Object.entries(providerReliability)
+  // 0 of 0 cases is "no data yet," not "bad reliability" -- rateColor's math would otherwise
+  // read an empty batch as a failing one (0% <= 0.5 threshold), which is misleading rather than
+  // honest. Redesign-skill audit finding, 2026-08-30 polish pass.
+  const hasData = reliability.total_cases > 0
 
   return (
     <div
@@ -38,12 +42,12 @@ export function ReliabilityPanel({ reliability, providerReliability }: Reliabili
       <div className="mt-4 flex items-baseline gap-3">
         <span
           className="text-3xl font-semibold tabular-nums"
-          style={{ color: rateColor(reliability.reliability_rate) }}
+          style={{ color: hasData ? rateColor(reliability.reliability_rate) : "var(--color-ink-faint)" }}
         >
-          {(reliability.reliability_rate * 100).toFixed(1)}%
+          {hasData ? `${(reliability.reliability_rate * 100).toFixed(1)}%` : "—"}
         </span>
         <span className="text-xs" style={{ color: "var(--color-ink-muted)" }}>
-          {reliability.clean_cases} of {reliability.total_cases} cases clean
+          {hasData ? `${reliability.clean_cases} of ${reliability.total_cases} cases clean` : "No cases run yet"}
         </span>
       </div>
 

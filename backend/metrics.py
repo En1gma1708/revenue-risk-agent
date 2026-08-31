@@ -205,3 +205,39 @@ def compute_provider_reliability(log_entries: list[dict]) -> dict:
             "failure_rate": round(stats["failed"] / total, 4) if total else 0.0,
         }
     return result
+
+
+# ---------------------------------------------------------------------------
+# Checker (reflection agent) metrics -- added 2026-08-30 alongside pydantic_agents.py's checker
+# agent (see DEVLOG.md same date). Without this, checker activity was only visible via a manual
+# DB query for outcome in {checker_approved, checker_flagged} -- exactly the "re-derived by hand
+# from raw rows" gap compute_reliability_metrics was built to close for the reliability story,
+# now closed the same way for the checker story.
+# ---------------------------------------------------------------------------
+
+def compute_checker_metrics(cases: list[dict], log_entries: list[dict]) -> dict:
+    """
+    How often the checker agent actually ran, and what it found -- the real evidence for the
+    Reflection pattern claim in NOVELTY.md's agentic-pattern-audit table, queryable the same way
+    every other claim in this project is (never hand-picked, always a live query over real log
+    data). `_needs_checker_review`'s trigger logic lives in pydantic_agents.py, not duplicated
+    here -- this function only reads what the checker already decided and logged, it doesn't
+    re-derive the trigger rule.
+    """
+    checker_entries = [e for e in log_entries if e.get("outcome") in ("checker_approved", "checker_flagged")]
+    reviewed_case_ids = {e["case_id"] for e in checker_entries}
+    flagged = [e for e in checker_entries if e.get("outcome") == "checker_flagged"]
+    flagged_case_ids = {e["case_id"] for e in flagged}
+
+    retried = sum(1 for e in flagged if e.get("decision", {}).get("recommended_action") == "retry_specialist")
+    escalated = sum(1 for e in flagged if e.get("decision", {}).get("recommended_action") == "escalate_to_human")
+
+    total_cases = len(cases)
+    return {
+        "cases_reviewed": len(reviewed_case_ids),
+        "cases_flagged": len(flagged_case_ids),
+        "flagged_retried": retried,
+        "flagged_escalated": escalated,
+        "review_rate": round(len(reviewed_case_ids) / total_cases, 4) if total_cases else 0.0,
+        "flag_rate_of_reviewed": round(len(flagged_case_ids) / len(reviewed_case_ids), 4) if reviewed_case_ids else 0.0,
+    }

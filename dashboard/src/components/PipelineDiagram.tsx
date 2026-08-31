@@ -1,3 +1,5 @@
+import { Reveal } from "./Reveal"
+
 interface Stage {
   n: number
   label: string
@@ -6,9 +8,9 @@ interface Stage {
 }
 
 const STAGES: Stage[] = [
-  { n: 1, label: "Detect", detail: "Router classifies surface + severity — plain code", kind: "code" },
-  { n: 2, label: "Reason", detail: "Case agent — real LLM tool-calling loop", kind: "model" },
-  { n: 3, label: "Govern", detail: "Guardrail engine — hard-coded, inside execute_action", kind: "code" },
+  { n: 1, label: "Detect", detail: "Router agent — a real LLM call, classifies surface + severity", kind: "model" },
+  { n: 2, label: "Reason", detail: "Hands off to 1 of 3 specialist agents — investigates, decides", kind: "model" },
+  { n: 3, label: "Govern", detail: "Guardrail engine — hard-coded, inside execute_action, shared by every specialist", kind: "code" },
   { n: 4, label: "Act", detail: "Autonomous action, human approval, or hard stop", kind: "data" },
   { n: 5, label: "Audit", detail: "Every decision logged — replayable per case", kind: "data" },
 ]
@@ -31,7 +33,8 @@ export function PipelineDiagram() {
     <div className="flex flex-col gap-0 sm:flex-row sm:items-stretch sm:gap-0">
       {STAGES.map((stage, i) => (
         <div key={stage.n} className="flex flex-1 items-stretch">
-          <div
+          <Reveal
+            delayMs={i * 90}
             className="flex flex-1 flex-col gap-2 rounded-xl p-4"
             style={{ background: "var(--color-surface)" }}
           >
@@ -58,7 +61,7 @@ export function PipelineDiagram() {
             >
               {stage.kind === "model" ? "model reasoning" : stage.kind === "code" ? "deterministic code" : "outcome"}
             </span>
-          </div>
+          </Reveal>
           {i < STAGES.length - 1 && (
             <div className="hidden w-6 shrink-0 items-center justify-center sm:flex" aria-hidden="true">
               <svg width="20" height="12" viewBox="0 0 20 12" fill="none">

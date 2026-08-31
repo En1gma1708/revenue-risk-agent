@@ -22,13 +22,15 @@ from pydantic import ValidationError
 from pydantic_ai import Agent
 
 from agent_loop import CaseAgentState, dispatch_tool
-from guardrails import AttemptHistory
+from guardrails import AttemptHistory, GuardrailResult
 from models import (
     ActionTaken,
+    ActionTier,
     Case,
     CaseStatus,
     ContactChannel,
     DeclineClass,
+    DecisionLogEntry,
     InstrumentType,
     PaymentFailureDetails,
     ReceivableDetails,
@@ -36,9 +38,13 @@ from models import (
 )
 from pydantic_agents import (
     CaseDeps,
+    CheckerVerdict,
     RoutingDecision,
+    _checker_log_entry,
     _finalize_status_if_unset,
+    _needs_checker_review,
     _register_case_tools,
+    _status_from_last_entry,
 )
 
 
@@ -553,3 +559,179 @@ def test_run_case_via_orchestrator_retries_once_then_escalates_on_no_handoff():
     assert log_entries[0].action_taken == ActionTaken.QUEUED_FOR_APPROVAL
     assert case.status == CaseStatus.ESCALATED
     assert decision.surface == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Checker agent -- a genuine reflection/QA pattern added 2026-08-30. Pure-logic pieces
+# (_needs_checker_review, _checker_log_entry, _status_from_last_entry) are tested directly, no
+# LLM needed; the end-to-end flow (sound / retry / escalate) is tested with a mocked checker +
+# specialist, same mocking approach as the router-retry test above -- no quota spent.
+# ---------------------------------------------------------------------------
+
+def _log_entry(tier: ActionTier, taken: ActionTaken, outcome: str = None) -> DecisionLogEntry:
+    return DecisionLogEntry(
+        log_id="x", case_id="c", timestamp=datetime(2026, 8, 30, 9, 0), iteration=1,
+        observed={}, decision={}, reasoning="r",
+        guardrail_check=GuardrailResult(passed=True, tier=tier),
+        action_taken=taken, action_tier=tier, outcome=outcome, amount_at_risk_inr=1000.0,
+    )
+
+
+def test_needs_checker_review_false_for_routine_autonomous_low_severity():
+    decision = RoutingDecision(surface="payment_failure", severity="low", reason="r")
+    entries = [_log_entry(ActionTier.AUTONOMOUS, ActionTaken.EXECUTED)]
+    assert _needs_checker_review(decision, entries) is False
+
+
+def test_needs_checker_review_false_for_no_entries():
+    decision = RoutingDecision(surface="payment_failure", severity="low", reason="r")
+    assert _needs_checker_review(decision, []) is False
+
+
+def test_needs_checker_review_true_if_any_entry_hit_hard_stop():
+    decision = RoutingDecision(surface="payment_failure", severity="low", reason="r")
+    entries = [_log_entry(ActionTier.HARD_STOP, ActionTaken.BLOCKED),
+               _log_entry(ActionTier.AUTONOMOUS, ActionTaken.EXECUTED)]
+    assert _needs_checker_review(decision, entries) is True
+
+
+def test_needs_checker_review_true_if_final_tier_is_approve_first():
+    decision = RoutingDecision(surface="payment_failure", severity="low", reason="r")
+    entries = [_log_entry(ActionTier.APPROVE_FIRST, ActionTaken.QUEUED_FOR_APPROVAL)]
+    assert _needs_checker_review(decision, entries) is True
+
+
+def test_needs_checker_review_true_if_router_severity_is_high():
+    decision = RoutingDecision(surface="payment_failure", severity="high", reason="r")
+    entries = [_log_entry(ActionTier.AUTONOMOUS, ActionTaken.EXECUTED)]
+    assert _needs_checker_review(decision, entries) is True
+
+
+def test_status_from_last_entry_maps_each_action_taken():
+    assert _status_from_last_entry([]) == CaseStatus.OPEN
+    assert _status_from_last_entry([_log_entry(ActionTier.AUTONOMOUS, ActionTaken.EXECUTED)]) == CaseStatus.RECOVERED
+    assert _status_from_last_entry([_log_entry(ActionTier.HARD_STOP, ActionTaken.BLOCKED)]) == CaseStatus.BLOCKED
+    assert _status_from_last_entry([_log_entry(ActionTier.APPROVE_FIRST, ActionTaken.QUEUED_FOR_APPROVAL)]) == CaseStatus.ESCALATED
+    assert _status_from_last_entry([_log_entry(ActionTier.LOG_ONLY, ActionTaken.LOGGED_ONLY)]) == CaseStatus.IN_PROGRESS
+
+
+def test_checker_log_entry_sound_shape():
+    case = make_payment_case()
+    verdict = CheckerVerdict(sound=True, concern="", recommended_action="accept")
+    entry = _checker_log_entry(case, "groq", verdict)
+    assert entry.outcome == "checker_approved"
+    assert entry.action_taken == ActionTaken.LOGGED_ONLY
+    assert entry.action_tier == ActionTier.LOG_ONLY
+    assert entry.provider == "pydantic-ai-groq-checker"
+    assert entry.guardrail_check.passed is True
+
+
+def test_checker_log_entry_flagged_shape():
+    case = make_payment_case()
+    verdict = CheckerVerdict(sound=False, concern="Reasoning doesn't match the guardrail result.",
+                              recommended_action="escalate_to_human")
+    entry = _checker_log_entry(case, "groq", verdict)
+    assert entry.outcome == "checker_flagged"
+    assert entry.action_taken == ActionTaken.QUEUED_FOR_APPROVAL
+    assert entry.action_tier == ActionTier.APPROVE_FIRST
+    assert entry.reasoning == "Reasoning doesn't match the guardrail result."
+    assert entry.guardrail_check.passed is False
+
+
+def test_run_checker_review_skips_when_not_triggered():
+    """A routine, low-stakes case must NOT trigger a checker call at all -- this is the cost
+    control the whole design rests on. Patches _make_checker to a MagicMock that would fail the
+    test if ever constructed, proving the checker genuinely isn't invoked, not just that its
+    output is ignored."""
+    from unittest.mock import MagicMock, patch
+    import pydantic_agents as pa
+
+    case = make_payment_case()
+    decision = RoutingDecision(surface="payment_failure", severity="low", reason="r")
+    log_entries = [_log_entry(ActionTier.AUTONOMOUS, ActionTaken.EXECUTED)]
+
+    never_called = MagicMock(side_effect=AssertionError("checker should not have been constructed"))
+    with patch.object(pa, "_make_checker", never_called):
+        result = pa._run_checker_review(case, decision, log_entries, "fake-model", "groq",
+                                         AttemptHistory(), [case])
+
+    never_called.assert_not_called()
+    assert result == log_entries
+
+
+def test_run_checker_review_sound_verdict_appends_approval_only():
+    from unittest.mock import MagicMock, patch
+    import pydantic_agents as pa
+
+    case = make_payment_case()
+    decision = RoutingDecision(surface="payment_failure", severity="high", reason="r")
+    log_entries = [_log_entry(ActionTier.AUTONOMOUS, ActionTaken.EXECUTED)]
+
+    fake_checker = MagicMock()
+    fake_checker.run_sync.return_value = MagicMock(
+        output=CheckerVerdict(sound=True, concern="", recommended_action="accept"))
+
+    with patch.object(pa, "_make_checker", return_value=fake_checker):
+        result = pa._run_checker_review(case, decision, log_entries, "fake-model", "groq",
+                                         AttemptHistory(), [case])
+
+    assert len(result) == 2
+    assert result[-1].outcome == "checker_approved"
+    fake_checker.run_sync.assert_called_once()
+
+
+def test_run_checker_review_flagged_escalate_sets_case_escalated():
+    from unittest.mock import MagicMock, patch
+    import pydantic_agents as pa
+
+    case = make_payment_case()
+    decision = RoutingDecision(surface="payment_failure", severity="high", reason="r")
+    log_entries = [_log_entry(ActionTier.AUTONOMOUS, ActionTaken.EXECUTED)]
+
+    fake_checker = MagicMock()
+    fake_checker.run_sync.return_value = MagicMock(
+        output=CheckerVerdict(sound=False, concern="Looks wrong.", recommended_action="escalate_to_human"))
+
+    with patch.object(pa, "_make_checker", return_value=fake_checker):
+        result = pa._run_checker_review(case, decision, log_entries, "fake-model", "groq",
+                                         AttemptHistory(), [case])
+
+    assert len(result) == 2
+    assert result[-1].outcome == "checker_flagged"
+    assert case.status == CaseStatus.ESCALATED
+
+
+def test_run_checker_review_flagged_retry_reruns_specialist_once_never_rechecked():
+    """The core bounded-retry guarantee: a flagged case gets exactly ONE more specialist run, and
+    that retry's output is never fed back into the checker again -- no check-retry-check loop."""
+    from unittest.mock import MagicMock, patch
+    import pydantic_agents as pa
+
+    case = make_payment_case()
+    decision = RoutingDecision(surface="payment_failure", severity="high", reason="r")
+    log_entries = [_log_entry(ActionTier.AUTONOMOUS, ActionTaken.EXECUTED)]
+
+    fake_checker = MagicMock()
+    fake_checker.run_sync.return_value = MagicMock(
+        output=CheckerVerdict(sound=False, concern="Looks wrong.", recommended_action="retry_specialist"))
+
+    retry_entry = _log_entry(ActionTier.APPROVE_FIRST, ActionTaken.QUEUED_FOR_APPROVAL)
+    fake_specialist = MagicMock()
+
+    def fake_run_sync(prompt, deps):
+        deps.log_entries.append(retry_entry)
+
+    fake_specialist.run_sync.side_effect = fake_run_sync
+
+    with patch.object(pa, "_make_checker", return_value=fake_checker), \
+         patch.object(pa, "_make_specialist", return_value=fake_specialist):
+        result = pa._run_checker_review(case, decision, log_entries, "fake-model", "groq",
+                                         AttemptHistory(), [case])
+
+    # original entry + checker's flag entry + the retry's own new entry
+    assert len(result) == 3
+    assert result[1].outcome == "checker_flagged"
+    assert result[2] is retry_entry
+    fake_checker.run_sync.assert_called_once()       # checker itself only ever called once
+    fake_specialist.run_sync.assert_called_once()     # exactly one retry, not re-checked afterward
+    assert case.status == CaseStatus.ESCALATED        # re-derived from the retry's own QUEUED_FOR_APPROVAL outcome

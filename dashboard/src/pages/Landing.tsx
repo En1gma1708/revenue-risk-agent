@@ -3,6 +3,7 @@ import { Link } from "react-router-dom"
 import { fetchCaseTrace } from "../api"
 import { AmbientBackground } from "../components/AmbientBackground"
 import { PipelineDiagram } from "../components/PipelineDiagram"
+import { Reveal } from "../components/Reveal"
 import type { CaseTraceResponse } from "../types"
 
 const TIER_TOKEN: Record<string, { fg: string; bg: string }> = {
@@ -12,17 +13,22 @@ const TIER_TOKEN: Record<string, { fg: string; bg: string }> = {
   LOG_ONLY: { fg: "var(--color-ink-muted)", bg: "var(--color-border-subtle)" },
 }
 
-// The hero's signature moment: PMT-0002's real trace, rendered live from the API rather than a
-// mocked screenshot. Grounds the "the model decides, the code enforces" headline in the actual
-// subject matter (a real case where the agent was blocked twice before converging) instead of a
-// generic stat-tile hero. Falls back to a static illustrative shape if the API/case isn't
-// reachable, so the landing page still tells its story with the backend down.
+// The hero's signature moment: PMT-0020's real trace, rendered live from the API rather than a
+// mocked screenshot. Grounds "the model decides, the code enforces" in the actual subject matter
+// (a real case where the specialist proposed 2 different, genuinely sensible actions -- a payment
+// link, then an RBI pre-debit notice -- and was blocked both times by the same rule before
+// correctly escalating) instead of a generic stat-tile hero. Falls back to a static illustrative
+// shape if the API/case isn't reachable, so the landing page still tells its story with the
+// backend down. Switched from PMT-0002 to PMT-0020 on the Gate 4 migration (2026-08-30) -- the
+// old case's story changed under the new router+specialist architecture (now resolves in 1 turn,
+// no longer a multi-block story), so re-found the strongest real multi-turn case in the new
+// dataset rather than let the hero quietly show a mismatched narrative.
 function HeroTraceSnippet() {
   const [data, setData] = useState<CaseTraceResponse | null>(null)
   const [failed, setFailed] = useState(false)
 
   useEffect(() => {
-    fetchCaseTrace("PMT-0002")
+    fetchCaseTrace("PMT-0020")
       .then(setData)
       .catch(() => setFailed(true))
   }, [])
@@ -35,9 +41,9 @@ function HeroTraceSnippet() {
     })) ??
     (failed
       ? [
-          { tier: "HARD_STOP", label: "auto-retry", blocked: true },
-          { tier: "HARD_STOP", label: "payment link", blocked: true },
-          { tier: "APPROVE_FIRST", label: "escalate", blocked: false },
+          { tier: "HARD_STOP", label: "send payment link", blocked: true },
+          { tier: "HARD_STOP", label: "send predebit notice", blocked: true },
+          { tier: "APPROVE_FIRST", label: "queue for approval", blocked: false },
         ]
       : [])
 
@@ -48,10 +54,13 @@ function HeroTraceSnippet() {
     >
       <div className="mb-3 flex items-center justify-between">
         <span className="font-mono text-xs" style={{ color: "var(--color-ink-faint)" }}>
-          case PMT-0002 · ₹62,961 payment failure
+          case PMT-0020 · ₹46,588 payment failure
         </span>
-        <span className="text-[10px] font-medium uppercase tracking-wide" style={{ color: "var(--color-brand)" }}>
-          live
+        <span
+          className="text-[10px] font-medium uppercase tracking-wide"
+          style={{ color: failed ? "var(--color-ink-faint)" : "var(--color-brand)" }}
+        >
+          {data ? "live" : failed ? "illustrative" : "loading"}
         </span>
       </div>
       <div className="flex flex-col gap-2">
@@ -83,9 +92,10 @@ function HeroTraceSnippet() {
         })}
       </div>
       <p className="mt-3 text-xs leading-relaxed" style={{ color: "var(--color-ink-faint)" }}>
-        Two proposals, blocked by the same hard-coded rule both times, before the third converges on
-        the compliant action. This isn't a prompt the model chose to follow — it's code its tool
-        calls can't get past.
+        Two different, genuinely sensible proposals — a payment link, then an RBI pre-debit notice
+        — both blocked by the same hard-coded rule, before the specialist correctly escalates to a
+        human. This isn't a prompt the model chose to follow — it's code its tool calls can't get
+        past.
       </p>
     </div>
   )
@@ -93,7 +103,7 @@ function HeroTraceSnippet() {
 
 function Section({ eyebrow, title, children }: { eyebrow: string; title: string; children: React.ReactNode }) {
   return (
-    <section className="py-10">
+    <Reveal as="section" className="py-10">
       <p className="text-xs font-medium uppercase tracking-[0.14em]" style={{ color: "var(--color-brand)" }}>
         {eyebrow}
       </p>
@@ -101,7 +111,7 @@ function Section({ eyebrow, title, children }: { eyebrow: string; title: string;
         {title}
       </h2>
       <div className="mt-5">{children}</div>
-    </section>
+    </Reveal>
   )
 }
 
@@ -123,26 +133,36 @@ export default function Landing() {
                 Revenue Recovery Agent
               </span>
             </span>
-            <div className="flex items-center gap-3">
-              <Link
-                to="/try"
-                className="rounded-[var(--radius-pill)] px-4 py-2 text-sm font-medium no-underline"
-                style={{ border: "1px solid var(--color-border-subtle)", color: "var(--color-ink)" }}
-              >
-                Try your own case
-              </Link>
-              <Link
-                to="/dashboard"
-                className="rounded-[var(--radius-pill)] px-4 py-2 text-sm font-medium no-underline"
-                style={{ background: "var(--color-ink)", color: "var(--color-surface)" }}
-              >
-                Open live batch →
-              </Link>
+            <div className="flex items-center gap-5">
+              <nav className="hidden items-center gap-5 text-sm sm:flex">
+                <Link to="/architecture" className="no-underline" style={{ color: "var(--color-ink-muted)" }}>
+                  Architecture
+                </Link>
+                <Link to="/what-broke" className="no-underline" style={{ color: "var(--color-ink-muted)" }}>
+                  What broke
+                </Link>
+              </nav>
+              <div className="flex items-center gap-3">
+                <Link
+                  to="/try"
+                  className="rounded-[var(--radius-pill)] px-4 py-2 text-sm font-medium no-underline"
+                  style={{ border: "1px solid var(--color-border-subtle)", color: "var(--color-ink)" }}
+                >
+                  Try your own case
+                </Link>
+                <Link
+                  to="/dashboard"
+                  className="rounded-[var(--radius-pill)] px-4 py-2 text-sm font-medium no-underline"
+                  style={{ background: "var(--color-ink)", color: "var(--color-surface)" }}
+                >
+                  Open live batch →
+                </Link>
+              </div>
             </div>
           </div>
 
           <div className="grid grid-cols-1 items-center gap-10 py-10 lg:grid-cols-[1.1fr_0.9fr]">
-            <div>
+            <Reveal>
               <p className="text-xs font-medium uppercase tracking-[0.14em]" style={{ color: "var(--color-brand)" }}>
                 Razorpay AI Buildathon — Track 3, Revenue Recovery
               </p>
@@ -155,9 +175,10 @@ export default function Landing() {
                 The code enforces.
               </h1>
               <p className="mt-4 max-w-lg text-base leading-relaxed" style={{ color: "var(--color-ink-muted)" }}>
-                One reasoning loop, run identically across payment failures, checkout abandonment,
-                and overdue B2B receivables. What the agent may actually do next is never left to a
-                prompt — it's checked in code, every time, by a guardrail engine it cannot argue with.
+                A router hands each case to a specialist for payment failures, checkout
+                abandonment, or overdue B2B receivables. What any of them may actually do next is
+                never left to a prompt — it's checked in code, every time, by one guardrail engine
+                none of them can argue with.
               </p>
               <div className="mt-6 flex items-center gap-3">
                 <Link
@@ -175,8 +196,10 @@ export default function Landing() {
                   What broke before release
                 </a>
               </div>
-            </div>
-            <HeroTraceSnippet />
+            </Reveal>
+            <Reveal delayMs={120}>
+              <HeroTraceSnippet />
+            </Reveal>
           </div>
         </div>
       </div>
@@ -186,13 +209,15 @@ export default function Landing() {
           <PipelineDiagram />
         </Section>
 
-        <Section eyebrow="Why one agent, not three" title="Revenue loss doesn't respect surface boundaries">
+        <Section eyebrow="Why one compliance core, not three" title="Revenue loss doesn't respect surface boundaries">
           <p className="max-w-2xl text-sm leading-relaxed" style={{ color: "var(--color-ink-muted)" }}>
             A payment degrades, a checkout gets abandoned, an invoice goes overdue — often for the
-            same underlying customer. Most platforms, including Razorpay's own Agent Studio, ship a
-            separate purpose-built agent per surface. This project runs one shared policy core
-            instead: the same tool set, the same guardrail engine, the same reasoning loop, applied
-            identically across all three.
+            same underlying customer. Most platforms, including Razorpay's own Agent Studio, ship
+            separate, disconnected products per surface with no handoff between them. This project
+            runs a router that hands each case to one of 3 specialist agents — but every one of
+            them is checked against the exact same guardrail engine and shares the same tool set,
+            so a decline reason code, a stalled checkout, and a broken payment promise are all
+            evaluated under one compliance boundary, never three drifting copies of it.
           </p>
         </Section>
 

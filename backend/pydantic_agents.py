@@ -663,6 +663,10 @@ def run_case_via_orchestrator(
 
     decision, log_entries = deps.handoff_result
     _finalize_status_if_unset(case, log_entries)
+
+    log_entries = _run_checker_review(case, decision, log_entries, model, provider,
+                                       history, all_cases or [case])
+
     return decision, log_entries
 
 

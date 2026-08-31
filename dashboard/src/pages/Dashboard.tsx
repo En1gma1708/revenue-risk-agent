@@ -54,6 +54,7 @@ export default function Dashboard() {
           <div className="lg:col-span-2">
             <CaseTable
               cases={visibleCases}
+              totalCases={cases.length}
               selectedSurface={selectedSurface}
               onSelectSurface={setSelectedSurface}
               onSelectCase={(caseId) => navigate(`/case/${encodeURIComponent(caseId)}`)}

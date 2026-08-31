@@ -1,10 +1,11 @@
 import { Link } from "react-router-dom"
 import { PipelineDiagram } from "../components/PipelineDiagram"
+import { Reveal } from "../components/Reveal"
 import { TopNav } from "../components/TopNav"
 
 function Section({ eyebrow, title, children }: { eyebrow: string; title: string; children: React.ReactNode }) {
   return (
-    <section className="py-10">
+    <Reveal as="section" className="py-10">
       <p className="text-xs font-medium uppercase tracking-[0.14em]" style={{ color: "var(--color-brand)" }}>
         {eyebrow}
       </p>
@@ -12,14 +13,14 @@ function Section({ eyebrow, title, children }: { eyebrow: string; title: string;
         {title}
       </h2>
       <div className="mt-5">{children}</div>
-    </section>
+    </Reveal>
   )
 }
 
 const REASONING_ROWS = [
-  "Chooses which of 7 tools to call, and in what order, based on what it learns",
+  "A router agent classifies surface + severity, then hands off to 1 of 3 specialists",
   "Non-deterministic — the same case can take a different path across two runs",
-  "Reads case context, attempt history, and customer history to form a judgment",
+  "The specialist reads case context, attempt history, and customer history to judge",
   "Decides WHAT to try — a retry, a payment link, a mandate request, an escalation",
 ]
 
@@ -27,14 +28,14 @@ const GUARDRAIL_ROWS = [
   "A pure function over (case, proposed action, attempt history) — no model call",
   "Deterministic — same input always produces the same tier, every time",
   "Runs INSIDE execute_action's handler, not as a system-prompt instruction",
-  "Decides WHETHER the model's choice is allowed to actually happen",
+  "One engine, shared identically by the router and all 3 specialists — never duplicated",
 ]
 
 const PATTERN_AUDIT: { pattern: string; verdict: string; tone: "good" | "bad" | "warn" }[] = [
   { pattern: "Tool use / function calling", verdict: "Real, core — the whole loop is built on it", tone: "good" },
+  { pattern: "Orchestrator-worker (multi-agent)", verdict: "Real, core — a router hands off to 1 of 3 verified specialist agents", tone: "good" },
   { pattern: "Reflection", verdict: "Does not fit — the guardrail check is code, not a 2nd LLM critique", tone: "bad" },
   { pattern: "Planning / task decomposition", verdict: "Does not fit — no ambiguous goal to decompose", tone: "bad" },
-  { pattern: "Orchestrator-worker (multi-agent)", verdict: "Rejected on the merits — would undercut the unification claim", tone: "bad" },
   { pattern: "Memory / context management", verdict: "Real, but a design detail — attempt history + PTP state", tone: "warn" },
 ]
 
@@ -57,9 +58,10 @@ export default function Architecture() {
           How a decision actually gets made
         </h1>
         <p className="mt-2 max-w-2xl text-sm leading-relaxed" style={{ color: "var(--color-ink-muted)" }}>
-          Two different kinds of logic share this loop, and they are never allowed to blur into
-          one another: the model reasons about what to try, and a separate layer of ordinary code
-          decides whether it's allowed to happen.
+          A router agent classifies each case and hands it to one of 3 specialists — but every one
+          of them, and the router itself, is checked against the exact same layer of ordinary code
+          before anything is allowed to happen. Two different kinds of logic share this system, and
+          they are never allowed to blur into one another.
         </p>
 
         <Section eyebrow="The pipeline" title="Five stages, one loop per case">
@@ -120,26 +122,34 @@ export default function Architecture() {
           </Link>
         </Section>
 
-        <Section eyebrow="Why one agent, not three" title="Unification is the novelty claim, not a footnote">
+        <Section eyebrow="Why one compliance core, not three" title="Specialization is real. Unification is where it counts.">
           <p className="max-w-2xl text-sm leading-relaxed" style={{ color: "var(--color-ink-muted)" }}>
             No competitor — not Razorpay's own Agent Studio, not Stripe, not Chargebee — runs one
             shared decision policy across payment failures, checkout abandonment, and receivables.
-            Each treats revenue loss as siloed by type. This project runs the same tool set, the
-            same guardrail engine, and the same reasoning loop across all three, so a decline
-            reason code, a stalled checkout, and a broken payment promise are evaluated as the same
-            kind of event: an at-risk revenue signal the agent must diagnose and choose a compliant
-            intervention for.
+            Razorpay's own "agents" (Subscription Recovery, Abandoned Cart Conversion) are
+            confirmed, separate, disconnected products with no documented handoff between them —
+            not a genuine multi-agent system in the sense a real router-and-specialists
+            architecture is. This project runs 3 specialist agents that genuinely hand off to one
+            another, share the same tool set, and are checked against the exact same guardrail
+            engine, so a decline reason code, a stalled checkout, and a broken payment promise are
+            all evaluated under one compliance boundary — not three drifting copies of it.
           </p>
           <div className="mt-4 rounded-[var(--radius-card)] p-5" style={{ background: "var(--color-surface)" }}>
             <p className="text-sm font-semibold" style={{ color: "var(--color-ink)" }}>
-              Multi-agent delegation was considered, and rejected on the merits
+              How this got here: proven single-agent first, then a deliberate, gated migration
             </p>
             <p className="mt-1.5 text-sm leading-relaxed" style={{ color: "var(--color-ink-muted)" }}>
-              A separate worker agent per surface was a real option, not a shortcut skipped by
-              default. It was rejected because it would directly undercut this project's own
-              thesis: the whole claim is that one shared policy generalizes across all three
-              surfaces. Splitting into three specialized agents would prove the opposite of what
-              this project set out to demonstrate.
+              The system started as one agent handling all 3 surfaces — a real, defensible choice
+              at the time, since a separate worker per surface risked the compliance engine
+              drifting across copies. After direct pushback on that reasoning, the alternative was
+              built and proven rather than just argued: a real router-classifies →
+              hands-off-to-3-specialists system (Pydantic AI), verified through explicit gates —
+              unit tests proving guardrail behavior is byte-identical to the original across both
+              systems, then a real batch run validated the same way every other claim in this
+              project is (<code className="font-mono">compute_reliability_metrics</code>, never a
+              raw summary). It matched, then passed, the original system's clean-case count under
+              the same real quota constraints before being adopted as the primary architecture —
+              the original single-agent loop stays in the repo as proven prior art, not deleted.
             </p>
           </div>
         </Section>
@@ -151,9 +161,10 @@ export default function Architecture() {
             checked off for coverage.
           </p>
           <div className="flex flex-col gap-2">
-            {PATTERN_AUDIT.map((row) => (
-              <div
+            {PATTERN_AUDIT.map((row, i) => (
+              <Reveal
                 key={row.pattern}
+                delayMs={i * 70}
                 className="flex flex-col gap-1 rounded-[var(--radius-card)] p-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
                 style={{ background: "var(--color-surface)" }}
               >
@@ -163,7 +174,7 @@ export default function Architecture() {
                 <span className="text-xs sm:text-right" style={{ color: TONE_COLOR[row.tone] }}>
                   {row.verdict}
                 </span>
-              </div>
+              </Reveal>
             ))}
           </div>
         </Section>

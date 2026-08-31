@@ -51,3 +51,59 @@ body {
   background: var(--color-brand-soft);
   color: var(--color-brand);
 }
+
+/* Global hover/active/focus states -- redesign-skill audit finding (2026-08-30 polish pass):
+   every interactive element across every page (Links styled as buttons/pills, real <button>s,
+   the file-upload <label> on /try) was using inline style={{color/background}} for its resting
+   state and had NO :hover, :active, or focus treatment anywhere in the codebase -- taste-skill
+   flags this directly ("No hover states on buttons", "No active/pressed feedback", "Missing
+   focus ring -- an accessibility requirement, not optional"). Fixed once, globally, instead of
+   patching every component individually: opacity/transform are properties none of the existing
+   inline styles set, so a stylesheet rule for them applies cleanly on top of inline color/
+   background without fighting CSS specificity. */
+a,
+button,
+label:has(> input[type="file"]) {
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
+a:hover,
+button:not(:disabled):hover,
+label:has(> input[type="file"]):hover {
+  opacity: 0.82;
+}
+
+button:not(:disabled):active,
+label:has(> input[type="file"]):active {
+  transform: scale(0.98);
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Reveal-on-scroll utility for Reveal.tsx -- plain CSS + IntersectionObserver, no Framer Motion
+   (checked: not actually an installed dependency despite being assumed present -- see DEVLOG.md
+   2026-08-30 polish-pass entry). Respects reduced-motion, per taste-skill's own quality floor. */
+.reveal {
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 500ms ease, transform 500ms ease;
+}
+.reveal.reveal-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+}
