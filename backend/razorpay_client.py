@@ -147,8 +147,24 @@ def create_test_plan_and_subscription(client: razorpay.Client, amount_inr: float
 
 
 def get_subscription_status(client: razorpay.Client, subscription_id: str) -> Optional[SubscriptionStatus]:
+    """
+    Maps Razorpay's real subscription status values onto this project's 3-state
+    SubscriptionStatus enum (pending/halted/charged -- see models.py). Real Razorpay states are
+    broader than that (created, authenticated, active, pending, halted, cancelled, completed,
+    expired -- confirmed live 2026-08-31 by creating a real test subscription and fetching it: a
+    freshly-created, not-yet-authenticated subscription returns status="created", which this
+    function used to silently drop to None instead of a sensible PENDING mapping, a real gap found
+    on that live call, not caught before since this function had never actually been exercised
+    against a real subscription until then). "created"/"authenticated" both mean "mandate not yet
+    active, no charge has failed" -- the same real-world meaning as this project's own PENDING
+    state, so both map there. "cancelled"/"completed"/"expired" are genuinely outside this
+    project's 3-state model (there's no guardrail behavior defined for them) and correctly return
+    None rather than being force-mapped to something misleading.
+    """
     sub = client.subscription.fetch(subscription_id)
     status_map = {
+        "created": SubscriptionStatus.PENDING,
+        "authenticated": SubscriptionStatus.PENDING,
         "pending": SubscriptionStatus.PENDING,
         "halted": SubscriptionStatus.HALTED,
         "active": SubscriptionStatus.CHARGED,
