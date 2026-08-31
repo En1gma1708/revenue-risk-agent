@@ -3,22 +3,23 @@
 ## The core claim
 
 > Razorpay's own Agent Studio ships separate agents per surface (Subscription Recovery, Abandoned Cart
-> Conversion) and its Failed Payment Recovery product retries all failures uniformly without root-cause
-> diagnosis; Stripe Smart Retries and Chargebee dunning are similarly single-surface, rule-driven retry
-> schedulers layered with ML timing, not reasoning agents. This project instead runs **one policy core**
-> — a single tool-calling agent, the same tool set, the same hard-coded compliance guardrails, and the
-> same audit trail — across payment failures, checkout abandonment, and overdue B2B receivables. The
-> unification is in the ENFORCEMENT and DECISION-MAKING MACHINERY, not in flattening the surfaces into
-> indistinguishable data: a decline reason code, a stalled checkout, and a broken payment promise are
-> still reasoned about on their own terms (decline classification and NPCI retry state for one, cart
-> stage and time-since-abandonment for another, days-overdue and promise-to-pay history for the third)
-> — what's shared is that all three get routed through the SAME policy core rather than three
-> disconnected systems, each free to interpret "risky" and "compliant" differently. This is a
-> deliberate, defensible engineering choice, not a proven-superior one — a reasonable team could build
-> three separate agents instead and be equally justified; the real, citable gap this fills is Razorpay's
-> own product limitation (no root-cause diagnosis, stated on their own blog) and the brief's own framing
-> of revenue loss as a cross-surface problem, not a claim that unification is objectively better than
-> specialization in the abstract.
+> Conversion) — confirmed to be disconnected PRODUCTS with no documented handoff between them, not a
+> genuine multi-agent system — and its Failed Payment Recovery product retries all failures uniformly
+> without root-cause diagnosis; Stripe Smart Retries and Chargebee dunning are similarly single-surface,
+> rule-driven retry schedulers layered with ML timing, not reasoning agents. This project runs **one
+> compliance core** — a router agent that classifies each case and hands it to one of 3 real surface
+> specialists (payment failures, checkout abandonment, overdue B2B receivables), all sharing the same
+> tool set, the same hard-coded compliance guardrails, and the same audit trail. The unification is in
+> the ENFORCEMENT and DECISION-MAKING MACHINERY, not in flattening the surfaces into indistinguishable
+> data: a decline reason code, a stalled checkout, and a broken payment promise are still reasoned about
+> on their own terms by a specialist that knows that surface (decline classification and NPCI retry
+> state for one, cart stage and time-since-abandonment for another, days-overdue and promise-to-pay
+> history for the third) — what's shared is that all three specialists, and the router itself, are
+> checked against the SAME compliance core rather than three disconnected systems each free to interpret
+> "risky" and "compliant" differently. This started as a single unified agent (a real, defensible choice
+> at the time — see "Migration history" below); the router+specialist system was built and validated
+> afterward, specifically to prove the specialization-vs-unification tradeoff wasn't settled by argument
+> alone.
 > The differentiation isn't "we added an LLM" — every competitor already has ML somewhere in their
 > pipeline — it's that the **decision of what to do** is made at runtime by the model reasoning over
 > case-specific tool results, not selected from a pre-built decision tree, while the compliance boundary
@@ -77,20 +78,39 @@ trendy.
 
 | Pattern | Verdict | Why |
 |---|---|---|
-| **Tool use / function calling** | **Real, core** | The case agent needs data it cannot know from training — this specific case's history, whether a specific proposed action passes policy. The whole case-loop architecture (§ agent loop design) is built on the model choosing which of 7 tools to call, in what order, based on what it learns. This is the centerpiece, not decoration. |
-| **Reflection** (generator produces, evaluator critiques, loop until it passes) | **Does not fit** | Reflection needs a natural iterative output worth refining across multiple passes with a real error signal. Our `propose_intervention` → guardrail check → `execute_action` flow looks reflection-adjacent but isn't: the guardrail check is a **deterministic code check against fixed rules**, not a second LLM pass critiquing output quality. The model doesn't know NPCI's attempt count better on a re-read of the same context — looping self-critique here would risk compounding hallucination with no real signal driving improvement, not reduce it. |
-| **Planning / task decomposition** | **Does not fit** | Planning fits an unknown, ambiguous multi-step goal (e.g. "book me a trip"). A single case's action sequence is short and convergent — gather context, check history, check policy, decide, act, log — chosen dynamically by the model, but not a decomposition of an ambiguous goal into an unknown plan. There's no genuine sub-goal structure here to plan against. |
-| **Orchestrator-worker (multi-agent delegation)** | **Not used in the main system — but built and proven as a separate, working comparison artifact, not just reasoned about on paper** | Considered seriously, twice: do payment-failure, checkout-abandonment, and receivables cases warrant separate worker agents, each specialized per surface? The tool surface already returns surface-specific context per case, so a single agent is already effectively "specialized" by the data it's handed, without needing separate model instances or prompts per surface. This project's core claim is that **one shared policy generalizes across all three surfaces** — building three worker agents INTO the main submission would directly undercut that claim. But after direct, repeated pushback on this exact point (see DEVLOG.md 2026-08-30), the premise was fact-checked rather than just defended: Razorpay's own "agents" (Subscription Recovery, Abandoned Cart Conversion) turned out to be separate, disconnected PRODUCTS with no documented handoff or coordination — not a genuine multi-agent system either, which reframes the real comparison. A genuine router-classifies -> hands-off-to-3-specialists architecture was then built as a standalone, additive proof-of-concept (`backend/pydantic_agents.py`, on the Pydantic AI framework) and verified live: the router correctly classified a case and handed off to a specialist, which proposed a compliant action through the exact same guardrail engine the main system uses. This demonstrates the rejection was a genuine engineering tradeoff decision (compliance-consistency and cross-surface customer-history visibility vs. specialization), backed by a working artifact proving the alternative was understood and buildable — not "we didn't have time" or "we didn't think of it." |
-| **Memory / context management** | **Real, but correctly a design detail, not a headline feature** | Two genuine instances: (1) within a case's loop, the message history accumulates across tool-calling turns — standard loop-correctness territory, not a separate architecture; (2) across a case's lifecycle, `AttemptRecord` history and `PromiseToPay` state are exactly "state deliberately held so it doesn't need to be re-derived each time" (e.g. the agent reads prior attempt count rather than re-inferring whether the NPCI cap was hit). Both are folded into the existing data model and loop design rather than standing alone, matching how this pattern usually shows up in real systems. |
+| **Tool use / function calling** | **Real, core** | Every case needs data no model knows from training — this specific case's history, whether a specific proposed action passes policy. The whole architecture is built on the model (router and specialist alike) choosing which of its tools to call, in what order, based on what it learns. This is the centerpiece, not decoration. |
+| **Orchestrator-worker (multi-agent delegation)** | **Real, core — the primary architecture, not a comparison artifact** | Started as a single unified agent (a real, defensible choice — a shared policy is trivially consistent when there's only one implementation of it). After direct, repeated pushback ("if they question me on why I didn't do specialized agents + genuine orchestrator, is that not genuinely more impressive?" — see DEVLOG.md 2026-08-30), the premise was fact-checked rather than just defended: Razorpay's own "agents" (Subscription Recovery, Abandoned Cart Conversion) turned out to be separate, disconnected PRODUCTS with no documented handoff or coordination — not a genuine multi-agent system either, which reframed the real comparison. A genuine router-classifies → hands-off-to-3-specialists architecture (`backend/pydantic_agents.py`, Pydantic AI) was then built, proven through explicit gates (unit tests pinning guardrail behavior byte-identical to the original system, then a real batch run validated with `compute_reliability_metrics`, matching and then exceeding the original's clean-case count under the same real quota constraints), and adopted as the primary architecture. The original single-agent loop (`agent_loop.py`) stays in the repo as proven prior art. |
+| **Reflection** (generator produces, evaluator critiques, loop until it passes) | **Does not fit as headline Reflection — one narrow retry mechanism exists, honestly distinguished below** | Reflection needs a natural iterative output worth refining across multiple passes with a real error signal. Our `propose_intervention` → guardrail check → `execute_action` flow looks reflection-adjacent but isn't: the guardrail check is a **deterministic code check against fixed rules**, not a second LLM pass critiquing output quality. The model doesn't know NPCI's attempt count better on a re-read of the same context — looping self-critique here would risk compounding hallucination with no real signal driving improvement, not reduce it. **A separate, narrower thing was added 2026-08-30** (`run_case_via_orchestrator`, `pydantic_agents.py`): if the router never calls `hand_off_to_specialist` (or repeatedly names an invalid surface), it's retried once with an explicit nudge before the case is escalated to a human via a real `DecisionLogEntry` — no silent default to a guessed specialist. This is a **retry pattern, not Reflection**: it detects a missing/invalid TOOL CALL and retries the call, not the model critiquing its own completed output and revising it. Calling it Reflection would be overclaiming a pattern this project doesn't actually implement. |
+| **Planning / task decomposition** | **Does not fit** | Planning fits an unknown, ambiguous multi-step goal (e.g. "book me a trip"). A single case's action sequence is short and convergent — gather context, check history, check policy, decide, act, log — chosen dynamically by the specialist, but not a decomposition of an ambiguous goal into an unknown plan. There's no genuine sub-goal structure here to plan against. |
+| **Memory / context management** | **Real, but correctly a design detail, not a headline feature** | Two genuine instances: (1) within a case's loop, the message history accumulates across tool-calling turns — standard loop-correctness territory, not a separate architecture; (2) across a case's lifecycle, `AttemptRecord` history and `PromiseToPay` state are exactly "state deliberately held so it doesn't need to be re-derived each time" (e.g. the specialist reads prior attempt count rather than re-inferring whether the NPCI cap was hit). Both are folded into the existing data model and loop design rather than standing alone, matching how this pattern usually shows up in real systems. |
 
-**Net result: 1 pattern is the true centerpiece (tool use), 1 is a real supporting detail (memory/state),
-3 are deliberately absent from the main submission.** Orchestrator-worker is the most interesting of
-those three to discuss — not because it was skipped, but because it's the one pattern that was
-seriously reconsidered under real pushback, fact-checked against what competitors actually do, and
-built as a working, verified comparison artifact rather than settled by argument alone (see the table
-row above, and DEVLOG.md 2026-08-30). That's a stronger interview answer than either "we used every
-pattern" or "we didn't consider it" — it's "we built both and can show you why we chose the one we
-shipped."
+**Net result: 2 patterns are genuinely load-bearing (tool use, orchestrator-worker), 1 is a real
+supporting detail (memory/state), 2 are deliberately absent (planning; Reflection proper — though a
+narrower retry-on-missing-handoff mechanism exists and is explicitly NOT the same thing, see above).**
+Orchestrator-worker's own history is the
+most interesting thing to walk through in an interview — not "we used every pattern" or "we didn't
+consider it," but "we shipped one architecture, took real pushback on it seriously, built and gated the
+alternative properly instead of just arguing for it, and switched once it was actually proven — here's
+the DEVLOG history of every gate it had to pass." That's a stronger answer than defending a single
+unchanged decision would have been.
+
+## Migration history: single-agent → router + specialists
+
+Documented plainly because a project that quietly rewrote its own headline claim without saying so
+would be a credibility risk if a judge noticed. The system shipped its first working version as one
+unified agent handling all 3 surfaces (`backend/agent_loop.py`) — proven end-to-end, including the
+PMT-0002 guardrail-blocks-twice-then-converges trace this project used as its centerpiece demo case for
+several days. After real, repeated pushback questioning that choice, the alternative was built and
+proven rather than argued: `backend/pydantic_agents.py`, a genuine router-classifies →
+hands-off-to-one-of-3-specialists system on the Pydantic AI framework, reusing the exact same
+`guardrails.py` engine so compliance logic is never duplicated per agent. It passed 4 explicit gates
+(see `next_steps_multiagent_migration.md`, DEVLOG.md's 2026-08-30 entries) — unit test coverage
+including a direct parity test proving guardrail enforcement is identical across both systems, real
+batch infrastructure, a validated batch run matching and then exceeding the original system's clean-case
+count under the same live quota constraints — before being adopted as the primary, user-facing
+architecture. `agent_loop.py` remains in the repo, untouched, as documented prior art: the first proof
+that the compliance-as-code claim works, and the baseline the second system had to match before earning
+the switch.
 
 ## Update this file as the build evolves
 

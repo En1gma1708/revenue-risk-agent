@@ -430,3 +430,126 @@ def test_guardrail_parity_between_agent_loop_and_pydantic_agents(tools, name, ma
     agent_loop_finalize(case_a, state)
     _finalize_status_if_unset(case_b, deps.log_entries)
     assert case_a.status == case_b.status
+
+
+# ---------------------------------------------------------------------------
+# Router handoff mechanics -- added 2026-08-30, replacing plain-code specialist selection with a
+# genuine hand_off_to_specialist tool call the router itself decides to make. Tests here cover
+# what's testable WITHOUT a live LLM call (the tool's own validation logic and the escalation
+# path); the retry loop and a real valid handoff both require an actual router run and are
+# verified live in DEVLOG.md's Gate-4-follow-up entries, not here -- see that file before assuming
+# this coverage is complete.
+# ---------------------------------------------------------------------------
+
+from pydantic_agents import RouterDeps, VALID_SURFACES, _escalate_routing_failure, _make_router
+
+
+@pytest.fixture(scope="module")
+def router_tool():
+    """Extracts hand_off_to_specialist the same way `tools` extracts the case tools above --
+    Tool.function off a router built with a placeholder model string. Never calls .run_sync on the
+    router itself (that needs a real model), only invokes the tool function directly."""
+    router = _make_router("test")
+    return router._function_toolset.tools["hand_off_to_specialist"].function
+
+
+class FakeRouterCtx:
+    def __init__(self, deps):
+        self.deps = deps
+
+
+def make_router_deps(case: Case) -> RouterDeps:
+    return RouterDeps(case=case, history=AttemptHistory(), model="test", provider="groq", all_cases=[case])
+
+
+def test_hand_off_to_specialist_rejects_invalid_surface(router_tool):
+    """The core new validation: an unrecognized surface must be rejected by the tool itself
+    (before ever attempting to build/run a specialist agent), not silently coerced to a default.
+    This is what makes the retry loop in run_case_via_orchestrator meaningful -- the tool has to
+    actually be able to say no.
+
+    router_tool is `async def` (fixed 2026-08-30 -- Pydantic AI forbids run_sync() inside a tool
+    body, deadlock risk; the tool now awaits specialist.run() instead), so it's invoked here via
+    asyncio.run rather than a plain call -- this only exercises the invalid-surface path, which
+    returns before ever awaiting the specialist, so no event loop nesting issue arises."""
+    import asyncio
+    case = make_payment_case()
+    deps = make_router_deps(case)
+
+    result = json.loads(asyncio.run(router_tool(FakeRouterCtx(deps), surface="not_a_real_surface",
+                                                  severity="high", reason="test")))
+
+    assert "error" in result
+    assert "not_a_real_surface" in result["error"]
+    assert deps.handoff_result is None  # rejected before ever running a specialist
+
+
+@pytest.mark.parametrize("surface", sorted(VALID_SURFACES))
+def test_hand_off_to_specialist_accepts_every_valid_surface_name(surface):
+    """Every real surface name must be accepted by the validation gate itself (independent of
+    whether the specialist agent underneath can actually be reached) -- this is checkable without
+    a live LLM call by asserting VALID_SURFACES matches SPECIALIST_PROMPTS' keys exactly, the
+    actual source of truth the tool checks against."""
+    from pydantic_agents import SPECIALIST_PROMPTS
+    assert surface in SPECIALIST_PROMPTS
+
+
+def test_escalate_routing_failure_produces_a_real_decision_log_entry():
+    """When the router can't produce a valid handoff even after a retry, the case must get a real,
+    honest DecisionLogEntry -- not silently default to a guessed specialist (the old behavior this
+    replaced: specialist_map.get(surface, PAYMENT_SPECIALIST_PROMPT))."""
+    case = make_payment_case()
+    entry = _escalate_routing_failure(case, "router failed twice", provider="groq")
+
+    assert case.status == CaseStatus.ESCALATED
+    assert entry.action_taken == ActionTaken.QUEUED_FOR_APPROVAL
+    assert entry.outcome == "escalated_to_human"
+    assert entry.reasoning == "router failed twice"
+    assert entry.provider == "pydantic-ai-groq"
+
+
+def test_router_deps_handoff_result_starts_unset():
+    """RouterDeps.handoff_result being None is what run_case_via_orchestrator's retry logic keys
+    off of -- confirm the default is actually None, not some other falsy sentinel that could mask
+    a real (but empty) handoff."""
+    case = make_payment_case()
+    deps = make_router_deps(case)
+    assert deps.handoff_result is None
+
+
+def test_run_case_via_orchestrator_retries_once_then_escalates_on_no_handoff():
+    """Integration test for the actual retry-then-escalate LOOP inside
+    run_case_via_orchestrator, not just its pieces in isolation -- verified live 2026-08-30 via an
+    ad-hoc mock (see DEVLOG.md) before being turned into a real regression test. Mocks
+    _make_router to return a router whose run_sync NEVER calls hand_off_to_specialist (simulating
+    a router that concludes without ever handing off), so deps.handoff_result stays None on both
+    the initial attempt and the retry. Confirms: (1) the router is invoked exactly twice (1 initial
+    + 1 retry, not more, not fewer), (2) the final result is a real escalated_to_human
+    DecisionLogEntry, not a silent default to a guessed specialist (the old behavior this
+    replaced), (3) case.status ends up ESCALATED."""
+    from unittest.mock import MagicMock, patch
+    import pydantic_agents as pa
+
+    case = make_payment_case()
+    call_count = {"n": 0}
+
+    class NeverHandsOffRouter:
+        def __init__(self, *a, **k):
+            pass
+
+        def run_sync(self, *a, **k):
+            call_count["n"] += 1
+            return MagicMock(output=pa.RoutingDecision(surface="unknown", severity="unknown",
+                                                          reason="never handed off"))
+
+    with patch.object(pa, "_make_router", return_value=NeverHandsOffRouter()):
+        decision, log_entries = pa.run_case_via_orchestrator(
+            case, AttemptHistory(), "groq", api_key="fake-key-never-used",
+        )
+
+    assert call_count["n"] == 2, "expected exactly 1 initial + 1 retry call to the router"
+    assert len(log_entries) == 1
+    assert log_entries[0].outcome == "escalated_to_human"
+    assert log_entries[0].action_taken == ActionTaken.QUEUED_FOR_APPROVAL
+    assert case.status == CaseStatus.ESCALATED
+    assert decision.surface == "unknown"

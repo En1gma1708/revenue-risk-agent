@@ -361,11 +361,22 @@ def _make_specialist(system_prompt_template: str, model, deps_type=CaseDeps) -> 
 
 # ---------------------------------------------------------------------------
 # Router agent -- a REAL LLM classification call (surface + severity), not hardcoded routing.
-# Hands off to the matching specialist. Severity is passed through for the specialist's own
-# situational awareness, but the actual severity_score field is still computed identically to
-# router.py's compute_severity (imported, not reimplemented) for consistency with the rest of the
-# project's reporting.
+# Hands off to the matching specialist via a genuine tool call (hand_off_to_specialist), not
+# plain orchestration code picking the specialist after the router returns -- see
+# hand_off_to_specialist's own docstring for why this changed 2026-08-30. Severity is passed
+# through for the specialist's own situational awareness, but the actual severity_score field is
+# still computed identically to router.py's compute_severity (imported, not reimplemented) for
+# consistency with the rest of the project's reporting.
 # ---------------------------------------------------------------------------
+
+VALID_SURFACES = {"payment_failure", "checkout_abandonment", "overdue_receivable"}
+
+SPECIALIST_PROMPTS = {
+    "payment_failure": PAYMENT_SPECIALIST_PROMPT,
+    "checkout_abandonment": CHECKOUT_SPECIALIST_PROMPT,
+    "overdue_receivable": RECEIVABLE_SPECIALIST_PROMPT,
+}
+
 
 class RoutingDecision(BaseModel):
     surface: str = Field(description="One of: payment_failure, checkout_abandonment, overdue_receivable")
@@ -373,55 +384,306 @@ class RoutingDecision(BaseModel):
     reason: str = Field(description="One-sentence justification")
 
 
+@dataclass
+class RouterDeps:
+    """Deps for the router agent -- separate from CaseDeps (the specialist's deps shape) because
+    the router's only real job is picking a specialist and handing off; it doesn't need the full
+    case-tool surface (get_case_context etc.), only enough to run one specialist and report what
+    happened back to the caller. handoff_result is set BY the hand_off_to_specialist tool once the
+    router actually calls it -- this is how run_case_via_orchestrator (below) tells whether a real
+    handoff happened at all, vs. the router concluding without ever calling the tool."""
+    case: Case
+    history: AttemptHistory
+    model: object
+    provider: str
+    all_cases: list[Case] = field(default_factory=list)
+    handoff_result: Optional[tuple[RoutingDecision, list[DecisionLogEntry]]] = None
+
+
 def _make_router(model) -> Agent:
-    return Agent(
+    router = Agent(
         model,
-        output_type=RoutingDecision,
+        deps_type=RouterDeps,
         system_prompt=(
             "You are a routing agent for a revenue-recovery system. Given a raw case description, "
-            "classify its surface and your read of its severity, so it can be handed to the right "
-            "specialist agent."
+            "classify its surface and your read of its severity, then call hand_off_to_specialist "
+            "with your classification -- that tool call IS how you route the case, not just a "
+            "description of what should happen. You must call hand_off_to_specialist exactly once "
+            "before finishing."
         ),
     )
+
+    @router.tool
+    async def hand_off_to_specialist(ctx: RunContext[RouterDeps], surface: str, severity: str, reason: str) -> str:
+        """Call this exactly once, after classifying the case, to hand it off to the matching
+        surface specialist (payment_failure / checkout_abandonment / overdue_receivable). This
+        actually runs the specialist agent -- it is the real handoff mechanism, not advisory. If
+        `surface` doesn't match a known specialist, the handoff is rejected; retry with a valid
+        surface rather than guessing.
+
+        async, not sync (fixed 2026-08-30, found live on the first real post-change run): Pydantic
+        AI raises UserError if a tool body calls agent.run_sync() -- running a synchronous agent
+        run inside another agent's synchronous tool call risks a deadlock. The fix is this tool
+        being `async def` and using `await specialist.run(...)` (the async equivalent of
+        run_sync) instead -- the OUTER run_case_via_orchestrator entry point can still safely use
+        router.run_sync() itself, since that's the top-level call, not nested inside a tool."""
+        if surface not in VALID_SURFACES:
+            return json.dumps({
+                "error": f"{surface!r} is not a known surface. Must be one of: {sorted(VALID_SURFACES)}. "
+                         "Call hand_off_to_specialist again with a valid surface.",
+            })
+
+        deps = ctx.deps
+        specialist = _make_specialist(SPECIALIST_PROMPTS[surface], deps.model)
+        case_deps = CaseDeps(case=deps.case, history=deps.history,
+                              all_cases=deps.all_cases or [deps.case], provider=f"pydantic-ai-{deps.provider}")
+        await specialist.run(
+            f"Handle case {deps.case.case_id} ({deps.case.surface.value}), "
+            f"amount Rs.{deps.case.amount_inr:,.2f}.",
+            deps=case_deps,
+        )
+        decision = RoutingDecision(surface=surface, severity=severity, reason=reason)
+        deps.handoff_result = (decision, case_deps.log_entries)
+        return json.dumps({
+            "handed_off": True, "surface": surface,
+            "log_entries_produced": len(case_deps.log_entries),
+        })
+
+    return router
+
+
+def _escalate_routing_failure(case: Case, reason: str, provider: str) -> DecisionLogEntry:
+    """Same DecisionLogEntry shape as the escalate_to_human tool (see _register_case_tools) --
+    reused here, not reimplemented, so a routing-level escalation looks identical in the audit
+    trail to a specialist-level one. Used when the router never produces a valid handoff even
+    after a retry (see run_case_via_orchestrator) -- the case must still get a real, honest
+    terminal record rather than silently defaulting to a guessed specialist."""
+    case.status = CaseStatus.ESCALATED
+    return DecisionLogEntry(
+        log_id=str(uuid.uuid4()), case_id=case.case_id, timestamp=datetime.utcnow(), iteration=1,
+        observed={}, decision={"escalated": True, "reason": reason}, reasoning=reason,
+        guardrail_check=GuardrailResult(passed=True, tier=ActionTier.APPROVE_FIRST),
+        action_taken=ActionTaken.QUEUED_FOR_APPROVAL, action_tier=ActionTier.APPROVE_FIRST,
+        outcome="escalated_to_human", amount_at_risk_inr=case.amount_inr,
+        amount_recovered_inr=0.0, provider=f"pydantic-ai-{provider}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Checker agent -- a genuine reflection/QA pattern, distinct from both guardrails.py (hardcoded,
+# deterministic, checks COMPLIANCE) and the router's retry-on-missing-handoff logic (error
+# recovery, not judgment). This is a real second agent critiquing another agent's completed
+# decision, added 2026-08-30 after explicit discussion of what "senior teams actually do" for
+# LLM-as-judge review -- see DEVLOG.md for the full design rationale. Two deliberate cost controls
+# that make this viable on an already quota-constrained project:
+#   1. Single-shot review of the FINAL ARTIFACT (case facts + the specialist's completed decision),
+#      never a live re-run of the specialist's whole multi-turn tool-calling loop. A judge call is
+#      one cheap request, not a second expensive agentic run.
+#   2. Only triggered on cases worth the extra cost (_needs_checker_review, below) -- a cheap,
+#      structural, no-LLM-call rule, not "check everything" or "ask a model which cases to check"
+#      (which would be circular and cost a call just to decide).
+# ---------------------------------------------------------------------------
+
+class CheckerVerdict(BaseModel):
+    sound: bool = Field(description="True if the specialist's final decision and reasoning are "
+                                     "well-justified given the case facts and guardrail result.")
+    concern: str = Field(default="", description="If NOT sound: one-sentence explanation of what's "
+                                                  "wrong. Leave empty if sound.")
+    recommended_action: str = Field(description="One of: accept, retry_specialist, escalate_to_human. "
+                                                 "Use 'accept' whenever sound=True.")
+
+
+CHECKER_SYSTEM_PROMPT = """You are a quality-review agent for a revenue-recovery system. You are \
+given a case that a specialist agent has ALREADY finished handling: the raw case facts, and the \
+specialist's final decision (what it proposed, what the guardrail engine allowed, and its stated \
+reasoning). Your job is NOT to re-decide the case -- it's to judge whether the specialist's \
+decision and reasoning are actually sound given the facts, or whether something looks wrong: a \
+mismatch between the facts and the stated reasoning, a decision that technically passed \
+guardrails but doesn't make practical sense, or reasoning that doesn't actually support the \
+action taken.
+
+If sound, set sound=true, concern="", recommended_action="accept".
+If NOT sound, set sound=false, explain the concern in one sentence, and recommend either \
+"retry_specialist" (a different, better decision is plausibly available) or "escalate_to_human" \
+(the case is too ambiguous or high-stakes for another automated attempt to help)."""
+
+
+def _make_checker(model) -> Agent:
+    return Agent(model, output_type=CheckerVerdict, system_prompt=CHECKER_SYSTEM_PROMPT)
+
+
+def _needs_checker_review(decision: "RoutingDecision", log_entries: list[DecisionLogEntry]) -> bool:
+    """Cheap, structural trigger -- no LLM call needed to decide whether a case is worth a second
+    look. Checking every case would roughly double real LLM cost on top of an already
+    quota-constrained project for little added value on routine, low-stakes cases; these signals
+    target exactly the cases where a second opinion is actually worth its cost:
+      - any log entry hit HARD_STOP at some point (the PMT-0002-style multi-turn interaction --
+        inherently the most interesting/risky decisions to have gotten right)
+      - the FINAL tier is APPROVE_FIRST (already flagged as needing a human anyway -- checking the
+        reasoning quality behind that escalation is high-value)
+      - the router's own severity read was "high"
+    Deliberately excludes plain AUTONOMOUS/low-severity cases -- lowest stakes, already cheap and
+    safe by construction, not worth a second LLM call."""
+    if not log_entries:
+        return False
+    if any(e.action_tier == ActionTier.HARD_STOP for e in log_entries):
+        return True
+    if log_entries[-1].action_tier == ActionTier.APPROVE_FIRST:
+        return True
+    if decision.severity == "high":
+        return True
+    return False
+
+
+def _build_checker_review_prompt(case: Case, decision: "RoutingDecision", log_entries: list[DecisionLogEntry]) -> str:
+    last = log_entries[-1]
+    details = case.details_for_surface()
+    return (
+        f"Case {case.case_id} ({case.surface.value}), amount Rs.{case.amount_inr:,.2f}. "
+        f"Router classified this as surface={decision.surface}, severity={decision.severity}.\n"
+        f"Case details: {details.model_dump(mode='json') if details else {}}\n"
+        f"Specialist's final decision: {json.dumps(last.decision, default=str)}\n"
+        f"Specialist's reasoning: {last.reasoning}\n"
+        f"Guardrail result: tier={last.action_tier.value}, action_taken={last.action_taken.value}, "
+        f"violated_rules={last.guardrail_check.violated_rule_ids}\n"
+        f"Is this decision sound given the facts?"
+    )
+
+
+def _checker_log_entry(case: Case, provider: str, verdict: CheckerVerdict) -> DecisionLogEntry:
+    """Always produced when the checker runs, sound OR not -- so 'this case was reviewed and
+    approved' is as visible in the audit trail as 'this case was flagged,' not just the flagged
+    ones. Uses a distinct provider tag (f'pydantic-ai-{provider}-checker') so checker-call volume
+    and reliability can be tracked separately from the primary router/specialist calls in
+    compute_provider_reliability, without polluting those stats."""
+    sound = verdict.sound
+    return DecisionLogEntry(
+        log_id=str(uuid.uuid4()), case_id=case.case_id, timestamp=datetime.utcnow(), iteration=1,
+        observed={}, decision={"sound": sound, "recommended_action": verdict.recommended_action},
+        reasoning=verdict.concern or "Checker reviewed the specialist's decision and found it sound.",
+        guardrail_check=GuardrailResult(passed=sound, tier=ActionTier.LOG_ONLY if sound else ActionTier.APPROVE_FIRST),
+        action_taken=ActionTaken.LOGGED_ONLY if sound else ActionTaken.QUEUED_FOR_APPROVAL,
+        action_tier=ActionTier.LOG_ONLY if sound else ActionTier.APPROVE_FIRST,
+        outcome="checker_approved" if sound else "checker_flagged",
+        amount_at_risk_inr=case.amount_inr, amount_recovered_inr=0.0,
+        provider=f"pydantic-ai-{provider}-checker",
+    )
+
+
+def _run_checker_review(
+    case: Case, decision: "RoutingDecision", log_entries: list[DecisionLogEntry],
+    model, provider: str, history: AttemptHistory, all_cases: list[Case],
+) -> list[DecisionLogEntry]:
+    """Runs the checker IF _needs_checker_review says this case is worth it; otherwise a no-op.
+    Reuses the SAME already-resolved model object as the case's router+specialist calls (no extra
+    resolve_model/account lookup) -- keeps one case's calls on one consistent account.
+
+    Bounded action space, same principle as the router's own bounded retry (see
+    run_case_via_orchestrator): the checker can request AT MOST one specialist retry, and that
+    retry's output is NEVER re-checked -- avoids any risk of a check-retry-check loop by
+    construction, not just by prompting the model to stop."""
+    if not _needs_checker_review(decision, log_entries):
+        return log_entries
+
+    checker = _make_checker(model)
+    prompt = _build_checker_review_prompt(case, decision, log_entries)
+    result = checker.run_sync(prompt)
+    verdict: CheckerVerdict = result.output
+
+    log_entries.append(_checker_log_entry(case, provider, verdict))
+
+    if verdict.sound:
+        return log_entries
+
+    if verdict.recommended_action == "retry_specialist":
+        prompt_template = SPECIALIST_PROMPTS.get(decision.surface, PAYMENT_SPECIALIST_PROMPT)
+        specialist = _make_specialist(prompt_template, model)
+        case_deps = CaseDeps(case=case, history=history, all_cases=all_cases or [case],
+                              provider=f"pydantic-ai-{provider}")
+        specialist.run_sync(
+            f"A quality reviewer flagged your previous decision on case {case.case_id}: "
+            f"{verdict.concern}. Reconsider and handle this case again, addressing that concern.",
+            deps=case_deps,
+        )
+        log_entries.extend(case_deps.log_entries)
+        case.status = _status_from_last_entry(log_entries)   # re-derive from the retry's real outcome
+    else:   # escalate_to_human, or any other value the model returns
+        case.status = CaseStatus.ESCALATED
+
+    return log_entries
 
 
 def run_case_via_orchestrator(
     case: Case, history: AttemptHistory, provider: str,
     all_cases: Optional[list[Case]] = None, api_key: Optional[str] = None,
 ):
-    """Full pipeline: router classifies -> hands off to the matching specialist -> specialist runs
-    its full investigate/decide/execute loop. Returns (routing_decision, list[DecisionLogEntry]).
+    """Full pipeline: router classifies -> hands off to the matching specialist via a real tool
+    call (hand_off_to_specialist) -> specialist runs its full investigate/decide/execute loop.
+    Returns (routing_decision, list[DecisionLogEntry]).
+
+    Retry + escalation (2026-08-30): previously, an unrecognized/malformed routing result silently
+    defaulted to the payment specialist (specialist_map.get(..., PAYMENT_SPECIALIST_PROMPT)) --
+    every case got SOME handling, but a misrouted checkout/receivable case would run through the
+    wrong specialist with no record that anything went wrong. Now: if the router doesn't produce a
+    valid handoff (never calls hand_off_to_specialist, or repeatedly passes an invalid surface),
+    it's retried ONCE with an explicit nudge; if that also fails, the case is escalated to a human
+    with a real DecisionLogEntry explaining why, rather than guessed at.
 
     api_key: explicit account key for this case, passed straight through to resolve_model -- lets
     a batch runner assign accounts via its own weighted schedule (see run_batch_multiagent.py)
     instead of relying on this module's internal round-robin, which has no visibility into what a
     batch runner has already assigned to other concurrent/prior cases."""
     model = resolve_model(provider, api_key=api_key)
-
     router = _make_router(model)
+
     event_description = (
         f"surface(pre-labeled)={case.surface.value}, amount=Rs.{case.amount_inr:,.2f}, "
         f"customer={case.customer_name}, details={case.details_for_surface().model_dump(mode='json') if case.details_for_surface() else {}}"
     )
-    routing_result = router.run_sync(f"Classify this event: {event_description}")
-    decision: RoutingDecision = routing_result.output
 
-    specialist_map = {
-        "payment_failure": PAYMENT_SPECIALIST_PROMPT,
-        "checkout_abandonment": CHECKOUT_SPECIALIST_PROMPT,
-        "overdue_receivable": RECEIVABLE_SPECIALIST_PROMPT,
-    }
-    prompt_template = specialist_map.get(decision.surface, PAYMENT_SPECIALIST_PROMPT)
-    specialist = _make_specialist(prompt_template, model)
+    deps = RouterDeps(case=case, history=history, model=model, provider=provider, all_cases=all_cases or [case])
+    router.run_sync(f"Classify this event: {event_description}", deps=deps)
 
-    deps = CaseDeps(case=case, history=history, all_cases=all_cases or [case], provider=f"pydantic-ai-{provider}")
-    specialist.run_sync(
-        f"Handle case {case.case_id} ({case.surface.value}), amount Rs.{case.amount_inr:,.2f}.",
-        deps=deps,
-    )
+    if deps.handoff_result is None:
+        # Router concluded without ever calling hand_off_to_specialist, or every call it made used
+        # an invalid surface (rejected by the tool itself, see hand_off_to_specialist above) --
+        # retry once with an explicit nudge before giving up and escalating.
+        router.run_sync(
+            f"You did not complete a handoff. Classify this event and call hand_off_to_specialist "
+            f"with a valid surface (one of {sorted(VALID_SURFACES)}) now: {event_description}",
+            deps=deps,
+        )
 
-    _finalize_status_if_unset(case, deps.log_entries)
-    return decision, deps.log_entries
+    if deps.handoff_result is None:
+        reason = ("Router failed to produce a valid specialist handoff after 2 attempts -- "
+                  "routing this case to a human rather than guessing which specialist should handle it.")
+        entry = _escalate_routing_failure(case, reason, provider)
+        decision = RoutingDecision(surface="unknown", severity="unknown", reason=reason)
+        return decision, [entry]
+
+    decision, log_entries = deps.handoff_result
+    _finalize_status_if_unset(case, log_entries)
+    return decision, log_entries
+
+
+def _status_from_last_entry(log_entries: list[DecisionLogEntry]) -> CaseStatus:
+    """Pure mapping, extracted 2026-08-30 from _finalize_status_if_unset (below) so the checker
+    agent's retry path (see _run_checker_review) can re-derive status from a NEW final log entry
+    after a retry, not just on first completion -- _finalize_status_if_unset only fires when
+    case.status is still OPEN, which is already false by the time a retry happens (the first
+    specialist run already set a real status), so that gate had to be split out from the mapping
+    itself rather than reused as-is."""
+    if not log_entries:
+        return CaseStatus.OPEN
+    last = log_entries[-1]
+    if last.action_taken == ActionTaken.EXECUTED:
+        return CaseStatus.RECOVERED
+    elif last.action_taken == ActionTaken.BLOCKED:
+        return CaseStatus.BLOCKED
+    elif last.action_taken == ActionTaken.QUEUED_FOR_APPROVAL:
+        return CaseStatus.ESCALATED
+    else:
+        return CaseStatus.IN_PROGRESS
 
 
 def _finalize_status_if_unset(case: Case, log_entries: list[DecisionLogEntry]) -> None:
@@ -433,15 +695,7 @@ def _finalize_status_if_unset(case: Case, log_entries: list[DecisionLogEntry]) -
     providers than prompting alone (see agent_loop.py's own comment for the same reasoning)."""
     if case.status != CaseStatus.OPEN or not log_entries:
         return
-    last = log_entries[-1]
-    if last.action_taken == ActionTaken.EXECUTED:
-        case.status = CaseStatus.RECOVERED
-    elif last.action_taken == ActionTaken.BLOCKED:
-        case.status = CaseStatus.BLOCKED
-    elif last.action_taken == ActionTaken.QUEUED_FOR_APPROVAL:
-        case.status = CaseStatus.ESCALATED
-    else:
-        case.status = CaseStatus.IN_PROGRESS
+    case.status = _status_from_last_entry(log_entries)
 
 
 def _build_payment_failure_demo_case() -> Case:

@@ -2,31 +2,37 @@
 
 **Razorpay AI Buildathon — Track 3: "AI Revenue Recovery"**
 
-A single Claude-style LLM tool-calling agent that watches three different revenue-leak surfaces —
-failed payments, abandoned checkouts, and overdue B2B receivables — reasons over each case's context
-at runtime using the same decision loop, and either acts autonomously, asks a human for approval, or
-hard-stops, inside compliance guardrails it cannot override. Every real action is logged to a full
-audit trail: what it saw, what it decided, and why.
+A router agent classifies each revenue-leak event — a failed payment, an abandoned checkout, an
+overdue B2B receivable — and hands it to one of 3 real specialist agents, each of which investigates,
+decides, and acts for its surface. Every one of them, and the router itself, is checked against the
+exact same hard-coded compliance engine before anything is allowed to happen: act autonomously, ask a
+human for approval, or hard-stop. Every real action is logged to a full audit trail: what it saw, what
+it decided, and why.
 
 Full product framing, novelty argument, and metrics methodology: [PRD.md](PRD.md) ·
 [NOVELTY.md](NOVELTY.md) · [METRICS.md](METRICS.md).
 
-## Why one agent across three surfaces, not three separate agents
+## Why one compliance core, not three
 
 Revenue loss rarely happens in one clean step, and it doesn't happen on only one surface — a payment
 degrades, a checkout gets abandoned, an invoice goes overdue, often for the same underlying customer.
-Most platforms (including Razorpay's own Agent Studio) ship a separate purpose-built agent per surface.
-This project instead runs **one shared policy core** — the same tool set, the same guardrail engine,
-the same reasoning loop — applied identically across all three. See [NOVELTY.md](NOVELTY.md) for the
-full argument, including which of the standard "agentic patterns" were deliberately not used and why.
+Most platforms (including Razorpay's own Agent Studio) ship separate, disconnected products per
+surface with no handoff between them. This project runs 3 specialist agents that genuinely hand off
+from one router, share the same tool set, and are checked against the same guardrail engine — so a
+decline reason code, a stalled checkout, and a broken payment promise are all evaluated under one
+compliance boundary, not three drifting copies of it. See [NOVELTY.md](NOVELTY.md) for the full
+argument, including which of the standard "agentic patterns" apply and which were deliberately
+rejected.
 
-This isn't a default we didn't question: a genuine router-classifies → hands-off-to-3-surface-
-specialists architecture was separately built and verified live on the [Pydantic AI](https://ai.pydantic.dev/)
-framework ([backend/pydantic_agents.py](backend/pydantic_agents.py)) as a standalone comparison
-artifact, reusing the exact same guardrail engine every specialist calls into. It confirmed the
-single-agent choice is a deliberate tradeoff (compliance consistency, cross-surface customer-history
-visibility) rather than something never considered — see NOVELTY.md's orchestrator-worker row for the
-full reasoning.
+**This is a router + 3 specialists now, not a single agent** — a deliberate, gated migration, not a
+same-day rewrite. The system shipped its first working version as one unified agent handling all 3
+surfaces ([backend/agent_loop.py](backend/agent_loop.py)); after real pushback questioning that
+choice, the router-and-specialists architecture ([backend/pydantic_agents.py](backend/pydantic_agents.py),
+on [Pydantic AI](https://ai.pydantic.dev/)) was built and proven through explicit gates — unit tests
+pinning guardrail behavior byte-identical across both systems, then a real batch run matching and
+exceeding the original's clean-case count under the same quota constraints — before being adopted as
+the primary, user-facing architecture. `agent_loop.py` stays in the repo, untouched, as proven prior
+art. Full history: NOVELTY.md's "Migration history" section, DEVLOG.md's 2026-08-30 entries.
 
 ## Architecture
 
@@ -34,11 +40,11 @@ full reasoning.
 Synthetic + real event data (3 surfaces)
         │
         ▼
-Stage 0 — Router (plain Python, NOT an LLM call)
-   classifies surface + computes initial severity from the event shape
+Stage 1 — Router agent (a real LLM call, NOT plain code)
+   classifies surface + severity, hands off to one of 3 specialists
         │
         ▼
-Stage 1 — Case Agent (the real agent loop, one per case)
+Stage 2 — Specialist agent (one per surface, one per case)
    LLM + tool-calling loop, MAX_ITERATIONS hard cap
    tools: get_case_context, check_attempt_history, check_customer_history,
           check_policy_guardrails, propose_intervention, record_promise_to_pay,
@@ -47,6 +53,7 @@ Stage 1 — Case Agent (the real agent loop, one per case)
         ▼
 Guardrail engine (guardrails.py) — pure functions, data-driven rule table
    runs INSIDE execute_action's handler, not as a prompt instruction
+   shared identically by the router and all 3 specialists — never duplicated
    HARD_STOP / APPROVE_FIRST / AUTONOMOUS / LOG_ONLY tiers
         │
         ▼
@@ -57,12 +64,14 @@ Dashboard (React + Vite, served against FastAPI) — batch table, per-case trace
    timeline, guardrail ledger, headline recovery metrics
 ```
 
-**The intervention decision for each case comes from the model reasoning over live tool results**, not
-a hardcoded if/else tree that only uses the LLM to classify text — see [agent_loop.py](backend/agent_loop.py).
-**Guardrails are the opposite: hardcoded, deterministic, and enforced in code the model's tool calls
-pass through** — see [guardrails.py](backend/guardrails.py). Real regulatory grounding: NPCI UPI
-Autopay rules (4-attempt cap, spacing, non-peak-hour windows) and RBI rules (₹15k AFA threshold, 24h
-pre-debit notice).
+**The intervention decision for each case comes from a specialist reasoning over live tool results**,
+not a hardcoded if/else tree that only uses the LLM to classify text — see
+[pydantic_agents.py](backend/pydantic_agents.py). **Guardrails are the opposite: hardcoded,
+deterministic, and enforced in code every agent's tool calls pass through, proven byte-identical
+across the router+specialist system and the original single-agent system by a direct parity test** —
+see [guardrails.py](backend/guardrails.py). Real regulatory grounding: NPCI UPI Autopay rules
+(4-attempt cap, spacing, non-peak-hour windows) and RBI rules (₹15k AFA threshold, 24h pre-debit
+notice).
 
 ## What's real vs. synthetic (stated upfront, not discovered)
 
@@ -92,10 +101,11 @@ cp ../.env.example ../.env   # fill in your free-tier keys — see .env.example 
 # 2. Generate the synthetic case data (Razorpay-realistic reason codes/distributions)
 python generate_cases.py
 
-# 3. Run the full batch — this is where the actual agent reasoning happens
-python run_batch.py --resume   # defaults to groq,openrouter; pass --providers gemini,groq,openrouter to include Gemini
+# 3. Run the full batch through the primary architecture (router -> specialists) --
+#    this is where the actual agent reasoning happens
+python run_batch_multiagent.py --resume
 
-# 4. Serve the API
+# 4. Serve the API (reads data/revenue_risk_multiagent.db, the primary system's data)
 uvicorn app:app --reload
 
 # 5. In a second terminal — the dashboard
@@ -107,8 +117,11 @@ npm run dev
 Then open the printed Vite dev server URL (typically `http://localhost:5173`).
 
 `--resume` skips any case that already has a clean (non-error) result recorded, so re-running after a
-provider rate-limit interruption only processes what's left — see [run_batch.py](backend/run_batch.py)'s
-module docstring for why this exists.
+provider rate-limit interruption only processes what's left — see
+[run_batch_multiagent.py](backend/run_batch_multiagent.py)'s module docstring for why this exists.
+The original single-agent system is still fully runnable (`python run_batch.py --resume`, writing to
+its own separate `data/revenue_risk.db`) if you want to reproduce the prior architecture directly —
+see NOVELTY.md's "Migration history."
 
 ## Free-tier constraint (stated honestly)
 
@@ -179,12 +192,15 @@ python stress_test.py --n 334 --seed 999   # ~1,000 cases, writes to data_stress
 | File | What it is |
 |---|---|
 | [backend/models.py](backend/models.py) | Shared `Case` / `AttemptRecord` / `DecisionLogEntry` schemas |
-| [backend/guardrails.py](backend/guardrails.py) | The hardcoded compliance/policy engine |
-| [backend/agent_loop.py](backend/agent_loop.py) | The manual LLM tool-calling loop + tool dispatch table |
-| [backend/llm_client.py](backend/llm_client.py) | Swappable interface over Gemini/Groq/OpenRouter |
-| [backend/generate_cases.py](backend/generate_cases.py) | Synthetic data generator |
+| [backend/guardrails.py](backend/guardrails.py) | The hardcoded compliance/policy engine — the ONE engine every agent, in both systems, is checked against |
+| [backend/pydantic_agents.py](backend/pydantic_agents.py) | **Primary architecture**: router agent + 3 specialist agents, on Pydantic AI |
+| [backend/run_batch_multiagent.py](backend/run_batch_multiagent.py) | Orchestrates the full batch run through the primary architecture |
+| [backend/custom_case.py](backend/custom_case.py) / [backend/bulk_upload.py](backend/bulk_upload.py) | Live single-case and CSV/XLSX bulk submission, both through the primary architecture |
+| [backend/agent_loop.py](backend/agent_loop.py) | The original single-agent tool-calling loop — proven prior art, kept for direct comparison, no longer user-facing |
+| [backend/run_batch.py](backend/run_batch.py) | Orchestrates a batch run through the original single-agent system (its own separate DB) |
+| [backend/llm_client.py](backend/llm_client.py) | Swappable interface over Gemini/Groq/OpenRouter, used by `agent_loop.py` |
+| [backend/generate_cases.py](backend/generate_cases.py) | Synthetic data generator (shared by both systems) |
 | [backend/razorpay_client.py](backend/razorpay_client.py) | Real Razorpay Payments/Payment Links API wrapper |
-| [backend/run_batch.py](backend/run_batch.py) | Orchestrates the full batch run |
 | [backend/stress_test.py](backend/stress_test.py) | Architecture-scale test on a separate large synthetic batch (never touches `data/`) |
 | [backend/metrics.py](backend/metrics.py) | Headline/reliability/guardrail-ledger metric computations |
 | [backend/app.py](backend/app.py) | FastAPI endpoints the dashboard reads from |

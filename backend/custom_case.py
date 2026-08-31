@@ -1,18 +1,27 @@
 """
 Lets a visitor submit their OWN case (not one from the pre-generated synthetic batch) and watch
-the real agent process it live, end to end, through the same tool-calling loop and guardrail
-engine every batch case goes through. Built directly in response to a real concern: without this,
+the real agent process it live, end to end, through the same router-and-guardrail-checked path
+every batch case goes through. Built directly in response to a real concern: without this,
 the dashboard only ever shows the output of a script someone already ran -- there's no way for
 anyone outside this repo to tell the difference between "a genuine interactive agent" and "a
 pre-recorded batch someone is replaying." This is the honest fix for that, not a cosmetic one.
 
-Deliberately NOT reusing run_batch.run_batch() for this -- that function resets the whole DB and
-is built for a 95-case sweep. A single interactive submission needs to be purely additive (never
-touches the existing batch's rows) and needs to run exactly one case through exactly one LLM call
-chain, so it's built as its own small, direct path: construct a Case from the input, route it
-(severity only), run the same run_case_agent() loop the batch uses, persist the result the same
-way run_batch.py does per case, and hand back the case_id so the caller can fetch its trace via
-the existing /cases/{id}/trace endpoint -- no new read path needed.
+**Switched 2026-08-30 from agent_loop.run_case_agent to pydantic_agents.run_case_via_orchestrator**
+(Gate 4, official switch-in -- the router-classifies -> hands-off-to-a-specialist architecture is
+now the primary system, no longer a comparison PoC; see next_steps_multiagent_migration.md and
+CLAUDE.md's "Multi-agent status" section). A live visitor submission should demonstrate the actual
+shipped architecture, not the retired one -- agent_loop.py stays in the repo as documented prior
+art, but no longer backs any user-facing flow. Persists into db.MULTIAGENT_DB_PATH, the same file
+run_batch_multiagent.py writes the real 95-case batch into, so a live submission and the batch
+results live in one consistent dataset the dashboard reads from.
+
+Deliberately NOT reusing run_batch_multiagent.py's own batch loop for this -- that's built for a
+95-case sweep with --resume/reset semantics. A single interactive submission needs to be purely
+additive and needs to run exactly one case through exactly one router+specialist call chain, so
+it's built as its own small, direct path: construct a Case from the input, route it (severity
+only), run it through run_case_via_orchestrator(), persist the result the same way
+run_batch_multiagent.py does per case, and hand back the case_id so the caller can fetch its trace
+via the existing /cases/{id}/trace endpoint -- no new read path needed.
 """
 
 from __future__ import annotations
@@ -24,16 +33,20 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from agent_loop import run_case_agent
-from db import get_connection, init_db, insert_decision_log_entry, upsert_case
+from db import MULTIAGENT_DB_PATH, get_connection, init_db, insert_decision_log_entry, upsert_case
 from guardrails import AttemptHistory
-from llm_client import get_llm_client
+from pydantic_agents import run_case_via_orchestrator
 from models import (
     AbandonmentStage,
+    ActionTaken,
+    ActionTier,
     Case,
+    CaseStatus,
     CheckoutAbandonmentDetails,
     ContactChannel,
+    DecisionLogEntry,
     Device,
+    GuardrailResult,
     InstrumentType,
     PaymentFailureDetails,
     ReceivableDetails,
@@ -131,33 +144,48 @@ def _build_case(payload: CustomCaseInput) -> Case:
 
 
 def run_custom_case(payload: CustomCaseInput) -> str:
-    """Builds, runs, and persists ONE case from a live submission. Returns the case_id so the
-    caller can fetch its trace via the existing GET /cases/{id}/trace endpoint. Runs synchronously
-    -- a single case is a handful of LLM calls (seconds, not minutes), unlike a full batch."""
+    """Builds, runs, and persists ONE case from a live submission through the router->specialist
+    orchestrator. Returns the case_id so the caller can fetch its trace via the existing
+    GET /cases/{id}/trace endpoint. Runs synchronously -- a router call plus one specialist's loop
+    is a handful of LLM calls (seconds, not minutes), unlike a full batch."""
     case = _build_case(payload)
-    # get_llm_client() now defaults to LLM_PROVIDER (env, currently "groq") when no explicit
-    # provider is given -- both now point at the same empirically-stronger provider, so this just
-    # mirrors that resolution for the provider_name we attribute the decision to (reliability
-    # reporting needs the name that was ACTUALLY used, not "whatever the caller happened to pass").
-    # Earlier today this endpoint had its own hardcoded "groq" default specifically because
-    # LLM_PROVIDER was still "gemini" at the time (Gemini's 20-req/day cap made it a bad silent
-    # default for a live-visitor feature) -- that's now moot since LLM_PROVIDER itself changed.
+    # LLM_PROVIDER defaults to "groq" (see llm_client.get_llm_client's 2026-08-30 comment) --
+    # mirrored here so the provider_name attributed to this decision (for reliability reporting)
+    # matches what resolve_model() actually used, same reasoning as before the Gate 4 switch.
     provider_name = (payload.provider or os.environ.get("LLM_PROVIDER", "groq")).lower()
-    client = get_llm_client(provider_name)
 
-    state = run_case_agent(
-        case,
-        AttemptHistory(),
-        client,
-        log_fn=lambda line: None,
-        all_cases=[case],
-        provider_name=provider_name,
-    )
+    try:
+        _decision, log_entries = run_case_via_orchestrator(
+            case,
+            AttemptHistory(),
+            provider_name,
+            all_cases=[case],
+        )
+    except Exception as e:  # noqa: BLE001 - provider SDKs raise their own types (confirmed live:
+        # a real Groq 429 here raised pydantic_ai.exceptions.ModelHTTPError, which the batch
+        # runner (run_batch_multiagent.py) just skips-and-continues on -- correct for a batch that
+        # can retry later via --resume, but a single live HTTP request has no "later" to retry in;
+        # it must return something now. Mirrors agent_loop.py's own generation_error handling
+        # exactly, so a live submission degrades exactly as gracefully as it did before the Gate 4
+        # switch, instead of a raw 500.
+        entry = DecisionLogEntry(
+            log_id=str(uuid.uuid4()), case_id=case.case_id, timestamp=datetime.utcnow(),
+            iteration=1, observed={}, decision={},
+            reasoning=f"LLM generation failed: {e}",
+            guardrail_check=GuardrailResult(passed=False, tier=ActionTier.HARD_STOP,
+                                             violated_rule_ids=["generation_error"],
+                                             messages=[str(e)[:300]]),
+            action_taken=ActionTaken.BLOCKED, action_tier=ActionTier.HARD_STOP,
+            outcome="generation_error", amount_at_risk_inr=case.amount_inr,
+            amount_recovered_inr=0.0, provider=provider_name,
+        )
+        log_entries = [entry]
+        case.status = CaseStatus.ESCALATED
 
-    conn = get_connection()
+    conn = get_connection(MULTIAGENT_DB_PATH)
     init_db(conn)
     upsert_case(conn, case)
-    for entry in state.log_entries:
+    for entry in log_entries:
         insert_decision_log_entry(conn, entry)
     conn.close()
 

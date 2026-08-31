@@ -35,6 +35,7 @@ from pathlib import Path
 
 from config import DEMO_TODAY
 from db import (
+    MULTIAGENT_DB_PATH,
     get_cleanly_completed_case_ids,
     get_connection,
     init_db,
@@ -42,14 +43,6 @@ from db import (
     reset_db,
     upsert_case,
 )
-from db import DB_PATH as _SINGLE_AGENT_DB_PATH
-
-# Separate DB file from the single-agent system's (data/revenue_risk.db) -- both systems used to
-# share one file until a real test run here wrote 4 rows into it and made the two systems'
-# progress ambiguous (found live 2026-08-30, fixed immediately rather than left for Gate 3 to trip
-# over). db.get_connection() now takes an explicit path; every other db.py function is unchanged
-# and still works the same regardless of which file the connection points at.
-MULTIAGENT_DB_PATH = _SINGLE_AGENT_DB_PATH.parent / "revenue_risk_multiagent.db"
 from guardrails import AttemptHistory
 from llm_client import _keys_for_provider
 from models import AttemptRecord, Case

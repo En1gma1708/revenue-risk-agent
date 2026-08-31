@@ -21,7 +21,7 @@ from baseline import load_cases as load_baseline_cases
 from baseline import run_naive_baseline
 from bulk_upload import parse_upload, run_bulk
 from custom_case import CustomCaseInput, run_custom_case
-from db import get_connection, init_db, load_all_cases, load_all_decision_log_entries
+from db import MULTIAGENT_DB_PATH, get_connection, init_db, load_all_cases, load_all_decision_log_entries
 from guardrails import GUARDRAILS
 from metrics import (
     compute_agent_quality_metrics,
@@ -47,7 +47,13 @@ app.add_middleware(
 
 
 def _all_data() -> tuple[list[dict], list[dict]]:
-    conn = get_connection()
+    # Points at the multi-agent system's DB (MULTIAGENT_DB_PATH), not the single-agent default --
+    # Gate 4 official switch-in (2026-08-30, see next_steps_multiagent_migration.md and CLAUDE.md's
+    # "Multi-agent status" section): the router->specialist architecture is now the primary,
+    # user-facing system. The single-agent DB (data/revenue_risk.db, empty since an accidental
+    # wipe earlier the same day, see DEVLOG.md "Real mistake") stays untouched and rebuildable via
+    # run_batch.py whenever that's next prioritized, but no longer backs the live dashboard.
+    conn = get_connection(MULTIAGENT_DB_PATH)
     init_db(conn)   # no-op if tables already exist; safe to call on every request
     cases = load_all_cases(conn)
     entries = load_all_decision_log_entries(conn)

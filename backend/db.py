@@ -13,6 +13,15 @@ from models import Case, DecisionLogEntry
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "revenue_risk.db"
 
+# The multi-agent system's (pydantic_agents.py / run_batch_multiagent.py) own DB file -- kept
+# separate from DB_PATH ever since a real Gate-2 test run once shared the single-agent system's
+# file and wiped its progress (see DEVLOG.md 2026-08-30 "Real mistake"). Defined here, once, as
+# the single source of truth both run_batch_multiagent.py and app.py import -- duplicating this
+# one-line path computation in two places is exactly the kind of drift risk this project's own
+# "clean means one definition, not two" rule (get_cleanly_completed_case_ids) already learned the
+# hard way not to repeat.
+MULTIAGENT_DB_PATH = DB_PATH.parent / "revenue_risk_multiagent.db"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cases (
     case_id TEXT PRIMARY KEY,

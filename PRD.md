@@ -96,7 +96,7 @@ tool surface, and the guardrail schema) lives in the project's internal design n
 |---|---|
 | Backend | Python 3.11 + FastAPI |
 | Data store | SQLite (single file, no server — this is a demo/batch system, not production) |
-| Agent/LLM | Manual tool-calling loop via a swappable `LLMClient`; Groq/OpenRouter/Gemini free tiers (Gemini deprioritized as of 2026-08-30, see CLAUDE.md), weighted round-robin + resume support. A separate, additive multi-agent proof-of-concept (router + surface specialists) also exists on the Pydantic AI framework — see CLAUDE.md "Multi-agent status" |
+| Agent/LLM | **Primary**: a router agent classifies each case and hands off to 1 of 3 surface-specialist agents, built on the Pydantic AI framework, sharing one guardrail engine. Groq/OpenRouter/Gemini free tiers (Gemini deprioritized as of 2026-08-30), weighted round-robin + resume support. The original single-agent manual tool-calling loop (`agent_loop.py`) remains in the repo as proven prior art — see CLAUDE.md "Multi-agent status" for the full migration history |
 | Frontend | React + Vite + Tailwind CSS (fast, clean-looking dashboard components without hand-rolling every card/table/badge) |
 | Recovery-action integration | Razorpay Payment Links API (real, test mode) for payment-failure recovery actions; Razorpay Payments API for real test-mode failure data; Subscriptions API integration blocked on account activation (see DEVLOG.md) |
 | Hosting | Local execution only — no live deployment (not required by the brief). See CLAUDE.md "Deployment / hosting" for why n8n and Anthropic Managed Agents were considered and rejected. |
