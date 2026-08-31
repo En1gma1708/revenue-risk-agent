@@ -29,6 +29,7 @@ Run with: python backend/pydantic_agents.py [gemini|groq|openrouter]
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import uuid
@@ -47,6 +48,43 @@ from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Langfuse -- observability/eval for this router/specialist/checker system. Deliberately imported
+# and initialized AFTER load_dotenv() (a common real mistake per Langfuse's own docs: importing
+# before env vars load means the client initializes with missing/wrong credentials). Guarded on
+# LANGFUSE_PUBLIC_KEY being set so this file still works exactly as before -- in tests, in any
+# environment without Langfuse configured -- with zero behavior change when it's absent.
+#
+# Agent.instrument_all() is called ONCE, globally, rather than passing instrument=True to each
+# individual Agent(...) construction site: this file builds router/specialist/checker agents
+# dynamically per case (_make_router/_make_specialist/_make_checker), so a single global call here
+# covers all of them without needing to touch every call site. Consumes PydanticAI's OWN native
+# OpenTelemetry instrumentation -- Langfuse doesn't wrap/replace anything, it's an OTel backend
+# PydanticAI already ships support for, so switching observability backends later needs no
+# instrumentation rewrite (see langfuse.com/integrations/frameworks/pydantic-ai).
+_LANGFUSE_ENABLED = bool(os.environ.get("LANGFUSE_PUBLIC_KEY"))
+if _LANGFUSE_ENABLED:
+    from langfuse import get_client as _get_langfuse_client
+    from langfuse import propagate_attributes as _langfuse_propagate_attributes
+
+    langfuse = _get_langfuse_client()
+    Agent.instrument_all()
+else:
+    langfuse = None
+    _langfuse_propagate_attributes = None
+
+
+def flush_langfuse() -> None:
+    """Call at the end of any short-lived script (batch runners, the demo __main__ block below) --
+    NOT needed in a long-running server process (app.py) since Langfuse's background worker
+    flushes on its own schedule there. Common mistake #1 per the langfuse skill's own instrumentation
+    guidance: without an explicit flush() before process exit, a short script's traces can be lost
+    entirely if the process ends before the background export happens. No-op when Langfuse isn't
+    configured, so callers don't need their own _LANGFUSE_ENABLED check."""
+    if _LANGFUSE_ENABLED:
+        langfuse.flush()
+
 
 from config import DEMO_TODAY
 from guardrails import ActionTier, AttemptHistory, GuardrailResult, ProposedAction, enforce_guardrails
@@ -353,8 +391,14 @@ that has passed its promised date, that is the central fact: decide kept vs. mis
 accordingly rather than proposing a generic reminder. You have {max_iterations} turns."""
 
 
-def _make_specialist(system_prompt_template: str, model, deps_type=CaseDeps) -> Agent:
-    agent = Agent(model, deps_type=deps_type, system_prompt=system_prompt_template.format(max_iterations=MAX_ITERATIONS))
+def _make_specialist(system_prompt_template: str, model, deps_type=CaseDeps, name: Optional[str] = None) -> Agent:
+    # name is surfaced in Langfuse traces (and any other OTel-consuming tool) as the agent's own
+    # identity -- without it, every specialist defaults to the same generic name, making 3
+    # structurally-different agents indistinguishable in a trace tree (see the langfuse skill's
+    # own "Multi-agent systems" guidance: "derive a specific name... when the framework doesn't
+    # provide one").
+    agent = Agent(model, deps_type=deps_type, system_prompt=system_prompt_template.format(max_iterations=MAX_ITERATIONS),
+                  name=name)
     _register_case_tools(agent)
     return agent
 
@@ -404,6 +448,7 @@ def _make_router(model) -> Agent:
     router = Agent(
         model,
         deps_type=RouterDeps,
+        name="router",
         system_prompt=(
             "You are a routing agent for a revenue-recovery system. Given a raw case description, "
             "classify its surface and your read of its severity, then call hand_off_to_specialist "
@@ -434,7 +479,7 @@ def _make_router(model) -> Agent:
             })
 
         deps = ctx.deps
-        specialist = _make_specialist(SPECIALIST_PROMPTS[surface], deps.model)
+        specialist = _make_specialist(SPECIALIST_PROMPTS[surface], deps.model, name=f"specialist-{surface}")
         case_deps = CaseDeps(case=deps.case, history=deps.history,
                               all_cases=deps.all_cases or [deps.case], provider=f"pydantic-ai-{deps.provider}")
         await specialist.run(
@@ -509,7 +554,7 @@ If NOT sound, set sound=false, explain the concern in one sentence, and recommen
 
 
 def _make_checker(model) -> Agent:
-    return Agent(model, output_type=CheckerVerdict, system_prompt=CHECKER_SYSTEM_PROMPT)
+    return Agent(model, output_type=CheckerVerdict, system_prompt=CHECKER_SYSTEM_PROMPT, name="checker")
 
 
 def _needs_checker_review(decision: "RoutingDecision", log_entries: list[DecisionLogEntry]) -> bool:
@@ -597,7 +642,7 @@ def _run_checker_review(
 
     if verdict.recommended_action == "retry_specialist":
         prompt_template = SPECIALIST_PROMPTS.get(decision.surface, PAYMENT_SPECIALIST_PROMPT)
-        specialist = _make_specialist(prompt_template, model)
+        specialist = _make_specialist(prompt_template, model, name=f"specialist-{decision.surface}-retry")
         case_deps = CaseDeps(case=case, history=history, all_cases=all_cases or [case],
                               provider=f"pydantic-ai-{provider}")
         specialist.run_sync(
@@ -611,6 +656,54 @@ def _run_checker_review(
         case.status = CaseStatus.ESCALATED
 
     return log_entries
+
+
+@contextlib.contextmanager
+def _case_trace_span(case: Case, provider: str):
+    """The parent span every case's router+specialist+checker calls nest under (see
+    run_case_via_orchestrator's own docstring for why this matters -- without it, PydanticAI's
+    Agent.instrument_all() alone would produce 3 separate, unlinked traces per case instead of one
+    real pipeline trace). No-op (contextlib.nullcontext) when Langfuse isn't configured, so this
+    file's behavior is byte-identical with or without it.
+
+    Name and input, per a real self-audit against langfuse.com/docs/observability/best-practices
+    (fetched fresh 2026-08-31, not from memory -- required by this project's langfuse skill): the
+    name is verb-first and holds no dynamic value ("process-revenue-case", not "case-<surface>" --
+    the doc explicitly warns dynamic-valued names break grouping/filtering over time; surface
+    already lives in tags/metadata, which is exactly where the doc says dynamic values belong).
+    Root-observation input is set explicitly (found live: it defaulted to null, and the doc calls
+    this THE field that "deserves the most care" -- shown in the tracing table, read by
+    evaluators, compared across dataset experiments). Output is set by
+    _set_case_trace_output() at each of run_case_via_orchestrator's return points."""
+    if not _LANGFUSE_ENABLED:
+        yield
+        return
+    with langfuse.start_as_current_observation(as_type="span", name="process-revenue-case") as span:
+        span.update(input={
+            "case_id": case.case_id, "surface": case.surface.value,
+            "amount_inr": case.amount_inr, "customer_name": case.customer_name,
+        })
+        with _langfuse_propagate_attributes(
+            tags=[case.surface.value, "revenue-risk-agent"],
+            metadata={"case_id": case.case_id, "amount_inr": case.amount_inr, "provider": provider},
+        ):
+            yield
+
+
+def _set_case_trace_output(decision: "RoutingDecision", case: Case, log_entries: list[DecisionLogEntry]) -> None:
+    """Sets the root span's output -- what a reviewer needs at a glance without opening every
+    child observation (per the same best-practices audit as _case_trace_span above): the router's
+    classification, the case's final status, and the last real decision's outcome/tier. No-op when
+    Langfuse isn't configured."""
+    if not _LANGFUSE_ENABLED:
+        return
+    last = log_entries[-1] if log_entries else None
+    langfuse.update_current_span(output={
+        "routed_surface": decision.surface, "severity": decision.severity,
+        "final_status": case.status.value,
+        "last_outcome": last.outcome if last else None,
+        "last_tier": last.action_tier.value if last else None,
+    })
 
 
 def run_case_via_orchestrator(
@@ -632,42 +725,55 @@ def run_case_via_orchestrator(
     api_key: explicit account key for this case, passed straight through to resolve_model -- lets
     a batch runner assign accounts via its own weighted schedule (see run_batch_multiagent.py)
     instead of relying on this module's internal round-robin, which has no visibility into what a
-    batch runner has already assigned to other concurrent/prior cases."""
-    model = resolve_model(provider, api_key=api_key)
-    router = _make_router(model)
+    batch runner has already assigned to other concurrent/prior cases.
 
-    event_description = (
-        f"surface(pre-labeled)={case.surface.value}, amount=Rs.{case.amount_inr:,.2f}, "
-        f"customer={case.customer_name}, details={case.details_for_surface().model_dump(mode='json') if case.details_for_surface() else {}}"
-    )
+    Langfuse (when configured): the whole pipeline runs inside ONE parent span
+    (case-<surface>), so the router's run_sync(), the specialist's run() (called inside the
+    hand_off_to_specialist tool), and the checker's run_sync() (called inside
+    _run_checker_review) all nest under a single trace per case -- not 3 separate, unlinked
+    traces, which is what plain Agent.instrument_all() alone would produce given each is a
+    genuinely separate Agent instance with its own run() call. Tagged with the surface (for
+    per-surface filtering in the Langfuse UI) and case_id/amount/provider as metadata (an
+    identifier + context, not a session -- one case's full pipeline is already one trace by
+    construction here, so session_id doesn't apply the way it would for a multi-turn chat)."""
+    with _case_trace_span(case, provider):
+        model = resolve_model(provider, api_key=api_key)
+        router = _make_router(model)
 
-    deps = RouterDeps(case=case, history=history, model=model, provider=provider, all_cases=all_cases or [case])
-    router.run_sync(f"Classify this event: {event_description}", deps=deps)
-
-    if deps.handoff_result is None:
-        # Router concluded without ever calling hand_off_to_specialist, or every call it made used
-        # an invalid surface (rejected by the tool itself, see hand_off_to_specialist above) --
-        # retry once with an explicit nudge before giving up and escalating.
-        router.run_sync(
-            f"You did not complete a handoff. Classify this event and call hand_off_to_specialist "
-            f"with a valid surface (one of {sorted(VALID_SURFACES)}) now: {event_description}",
-            deps=deps,
+        event_description = (
+            f"surface(pre-labeled)={case.surface.value}, amount=Rs.{case.amount_inr:,.2f}, "
+            f"customer={case.customer_name}, details={case.details_for_surface().model_dump(mode='json') if case.details_for_surface() else {}}"
         )
 
-    if deps.handoff_result is None:
-        reason = ("Router failed to produce a valid specialist handoff after 2 attempts -- "
-                  "routing this case to a human rather than guessing which specialist should handle it.")
-        entry = _escalate_routing_failure(case, reason, provider)
-        decision = RoutingDecision(surface="unknown", severity="unknown", reason=reason)
-        return decision, [entry]
+        deps = RouterDeps(case=case, history=history, model=model, provider=provider, all_cases=all_cases or [case])
+        router.run_sync(f"Classify this event: {event_description}", deps=deps)
 
-    decision, log_entries = deps.handoff_result
-    _finalize_status_if_unset(case, log_entries)
+        if deps.handoff_result is None:
+            # Router concluded without ever calling hand_off_to_specialist, or every call it made
+            # used an invalid surface (rejected by the tool itself, see hand_off_to_specialist
+            # above) -- retry once with an explicit nudge before giving up and escalating.
+            router.run_sync(
+                f"You did not complete a handoff. Classify this event and call hand_off_to_specialist "
+                f"with a valid surface (one of {sorted(VALID_SURFACES)}) now: {event_description}",
+                deps=deps,
+            )
 
-    log_entries = _run_checker_review(case, decision, log_entries, model, provider,
-                                       history, all_cases or [case])
+        if deps.handoff_result is None:
+            reason = ("Router failed to produce a valid specialist handoff after 2 attempts -- "
+                      "routing this case to a human rather than guessing which specialist should handle it.")
+            entry = _escalate_routing_failure(case, reason, provider)
+            decision = RoutingDecision(surface="unknown", severity="unknown", reason=reason)
+            _set_case_trace_output(decision, case, [entry])
+            return decision, [entry]
 
-    return decision, log_entries
+        decision, log_entries = deps.handoff_result
+        _finalize_status_if_unset(case, log_entries)
+
+        log_entries = _run_checker_review(case, decision, log_entries, model, provider,
+                                           history, all_cases or [case])
+
+        _set_case_trace_output(decision, case, log_entries)
+        return decision, log_entries
 
 
 def _status_from_last_entry(log_entries: list[DecisionLogEntry]) -> CaseStatus:
@@ -795,3 +901,5 @@ if __name__ == "__main__":
                 "action_tier": entry.action_tier.value, "outcome": entry.outcome,
                 "reasoning": entry.reasoning[:200],
             }, indent=2))
+
+    flush_langfuse()

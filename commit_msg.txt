@@ -1,0 +1,40 @@
+Add Langfuse tracing (audited against best practices) and checker UI
+
+Langfuse tracing (backend/pydantic_agents.py):
+- Agent.instrument_all() called once globally after load_dotenv(), guarded on
+  LANGFUSE_PUBLIC_KEY so behavior is unchanged when Langfuse isn't configured.
+- Custom parent span (_case_trace_span) wraps the whole router->specialist->checker
+  pipeline per case, so all 3 separate Agent instances nest under ONE trace instead of
+  3 disconnected ones. Tagged with surface, metadata with case_id/amount/provider.
+  Every agent given a real name (router, specialist-<surface>, checker) for a
+  legible multi-agent trace tree.
+- Self-audited against langfuse.com/docs/observability/best-practices (fetched fresh):
+  found and fixed 2 real gaps -- root span name violated the verb-first/no-dynamic-values
+  naming convention (renamed case-<surface> -> process-revenue-case), and root span
+  input/output were both null (now set explicitly: case facts on entry, router
+  classification + final status + last decision on exit).
+- backend/tests/conftest.py (new): forces Langfuse off for the whole test session --
+  found live that running pytest was silently sending real traces to the real Langfuse
+  project under the test fixtures' shared fake case id, since no test mocked out
+  LANGFUSE_PUBLIC_KEY. Deleted the 2 traces this had already caused.
+- backend/requirements.txt: add langfuse==4.15.1.
+- .env.example: clarify LANGFUSE_HOST varies by project region, don't assume the default.
+
+Real trace volume (backend/run_langfuse_sample.py, new):
+- Runs a deliberately-curated 16-case real sample (all 3 surfaces, mixed tiers incl. real
+  HARD_STOP hits, known checker-triggering cases) through the now-instrumented pipeline
+  purely to generate Langfuse trace volume -- cheaper than a full 95-case re-run for
+  cases whose correctness is already proven. Does NOT touch db.py/the batch DB at all,
+  by construction (given this session's earlier real DB-wipe incident).
+- Result: 16/16 target cases produced a trace; 14/16 fully completed, 2 hit real 429s.
+  Real finding: even the 2 failed cases left partial-but-real, structurally-truncated
+  traces (OTel exports spans as they complete, not only on full success) -- confirmed on
+  CART-0009's trace (14 real observations, cut off right before log_decision).
+
+Checker/reflection agent UI (dashboard/src/components/CaseTrace.tsx):
+- Checker entries (outcome in {checker_approved, checker_flagged}) now render as a
+  distinct labeled callout ("REVIEWED BY CHECKER AGENT") with a shield-check/shield-alert
+  icon, instead of indistinguishable raw outcome text. Flagged entries surface the
+  checker's recommended_action.
+
+Full test suite: 88/88 passing throughout.

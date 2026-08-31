@@ -48,7 +48,13 @@ from db import (
 from guardrails import AttemptHistory
 from metrics import compute_checker_metrics
 from models import Case, DecisionLogEntry
-from pydantic_agents import RoutingDecision, _needs_checker_review, _run_checker_review, resolve_model
+from pydantic_agents import (
+    RoutingDecision,
+    _needs_checker_review,
+    _run_checker_review,
+    flush_langfuse,
+    resolve_model,
+)
 from run_batch_multiagent import _build_account_schedule, load_cases_and_history
 
 HIGH_SEVERITY_RETRO_THRESHOLD = 0.7
@@ -178,6 +184,8 @@ def main():
         print("\nchecker metrics (compute_checker_metrics, real query over the full DB):")
         print(json.dumps(compute_checker_metrics(cases, entries), indent=2))
         conn.close()
+
+    flush_langfuse()   # short-lived script -- see pydantic_agents.flush_langfuse's own docstring
 
 
 if __name__ == "__main__":

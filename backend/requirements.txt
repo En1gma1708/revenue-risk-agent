@@ -14,3 +14,11 @@ python-multipart==0.0.32
 # pydantic_agents.py PoC's default provider. Add google-genai>=2.18.0 + [google] here if Gemini
 # support in the Pydantic AI system is ever actually needed.
 pydantic-ai-slim[groq,openai]==2.36.0
+
+# Langfuse -- observability/eval for pydantic_agents.py's router/specialist/checker agents.
+# Consumes PydanticAI's native OTel instrumentation (Agent.instrument_all()), no framework
+# lock-in. Bumps opentelemetry-* to 1.44.0, which conflicts with chromadb's pinned
+# opentelemetry-exporter-otlp-proto-grpc==1.41.1 requirement -- confirmed harmless, chromadb is
+# not a dependency of this project (not in this file, never imported here); the conflict is only
+# between two unrelated packages that happen to share this environment.
+langfuse==4.15.1

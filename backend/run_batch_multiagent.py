@@ -46,7 +46,7 @@ from db import (
 from guardrails import AttemptHistory
 from llm_client import _keys_for_provider
 from models import AttemptRecord, Case
-from pydantic_agents import run_case_via_orchestrator
+from pydantic_agents import flush_langfuse, run_case_via_orchestrator
 from router import route_batch
 from run_batch import _build_weighted_account_schedule, find_ptp_due_cases
 
@@ -230,6 +230,8 @@ def main():
 
     print(f"\n{'=' * 60}\nBatch complete (multi-agent)\n{'=' * 60}")
     print(json.dumps(stats, indent=2))
+
+    flush_langfuse()   # short-lived script -- see pydantic_agents.flush_langfuse's own docstring
 
 
 if __name__ == "__main__":

@@ -38,3 +38,8 @@ attempt_history.json
 Thumbs.db
 .vscode/
 .idea/
+
+# Local AI-tooling config (installed skills/plugins) -- dev-tooling, not application code.
+.agents/
+.claude/
+skills-lock.json

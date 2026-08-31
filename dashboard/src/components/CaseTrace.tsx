@@ -17,7 +17,85 @@ const TIER_STYLES: Record<string, { dot: string; fg: string; bg: string }> = {
   AUTONOMOUS: { dot: "var(--color-good)", fg: "var(--color-good)", bg: "var(--color-good-soft)" },
 }
 
+// Checker (reflection agent) entries are a genuinely different KIND of trace row -- a second
+// agent reviewing the specialist's already-completed decision, not another turn in the same
+// investigate/decide/execute loop -- so they get their own icon + label instead of being read as
+// "just another turn" (which is what raw outcome text alone looked like before this).
+const CHECKER_OUTCOMES = new Set(["checker_approved", "checker_flagged"])
+
+// Consistent 1.6px-stroke line icons (no emoji), matching CaseTable.tsx's SurfaceIcon convention.
+function ShieldCheckIcon({ className }: { className?: string }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M12 3l7 3v6c0 4.5-3 8-7 9-4-1-7-4.5-7-9V6z" />
+      <path d="M9 12l2 2 4-4" />
+    </svg>
+  )
+}
+
+function ShieldAlertIcon({ className }: { className?: string }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M12 3l7 3v6c0 4.5-3 8-7 9-4-1-7-4.5-7-9V6z" />
+      <path d="M12 7.5v5" />
+      <path d="M12 15.5v.01" strokeWidth={2.4} />
+    </svg>
+  )
+}
+
+function CheckerTraceEntry({ entry }: { entry: DecisionLogEntry }) {
+  const sound = entry.outcome === "checker_approved"
+  const style = sound
+    ? { fg: "var(--color-good)", bg: "var(--color-good-soft)" }
+    : { fg: "var(--color-warn)", bg: "var(--color-warn-soft)" }
+  const recommendedAction = typeof entry.decision?.recommended_action === "string" ? entry.decision.recommended_action : null
+
+  return (
+    <div className="relative flex gap-3 pb-6 last:pb-0">
+      <div className="flex flex-col items-center">
+        <span
+          className="mt-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-full"
+          style={{ color: style.fg, background: style.bg }}
+        >
+          {sound ? <ShieldCheckIcon /> : <ShieldAlertIcon />}
+        </span>
+        <span className="mt-1 w-px flex-1" style={{ background: "var(--color-border-subtle)" }} />
+      </div>
+      <div className="min-w-0 flex-1 rounded-lg border px-3 py-2.5" style={{ borderColor: style.bg, background: "color-mix(in srgb, " + style.bg + " 45%, transparent)" }}>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: style.fg }}>
+            Reviewed by checker agent
+          </span>
+          <span
+            className="rounded-[var(--radius-pill)] px-2 py-0.5 text-xs font-semibold"
+            style={{ color: style.fg, background: "var(--color-surface)" }}
+          >
+            {sound ? "Sound" : "Flagged"}
+          </span>
+        </div>
+
+        {entry.reasoning && (
+          <p className="mt-1.5 text-sm leading-relaxed" style={{ color: "var(--color-ink)" }}>
+            {entry.reasoning}
+          </p>
+        )}
+
+        {!sound && recommendedAction && (
+          <p className="mt-1.5 text-xs" style={{ color: style.fg }}>
+            Recommended: <span className="font-mono">{recommendedAction.replace(/_/g, " ")}</span>
+            {recommendedAction === "retry_specialist" && " — specialist re-ran, see below"}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function TraceEntry({ entry }: { entry: DecisionLogEntry }) {
+  if (entry.outcome && CHECKER_OUTCOMES.has(entry.outcome)) {
+    return <CheckerTraceEntry entry={entry} />
+  }
+
   const style = TIER_STYLES[entry.action_tier] ?? TIER_STYLES.LOG_ONLY
   const blocked = entry.guardrail_check.violated_rule_ids.length > 0
 
