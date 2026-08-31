@@ -57,6 +57,13 @@ Guardrail engine (guardrails.py) — pure functions, data-driven rule table
    HARD_STOP / APPROVE_FIRST / AUTONOMOUS / LOG_ONLY tiers
         │
         ▼
+Stage 3 — Checker agent (a real reflection pattern, not another rule check)
+   reviews the specialist's ALREADY-COMPLETED decision for soundness,
+   independent of whether it passed guardrails; triggered only on cases
+   worth the cost (any HARD_STOP hit, final APPROVE_FIRST, high severity)
+   on a flag: one bounded specialist retry, or escalate — never re-checked
+        │
+        ▼
 Audit trail (DecisionLogEntry rows, SQLite) — one row per real action taken
         │
         ▼
@@ -72,6 +79,44 @@ across the router+specialist system and the original single-agent system by a di
 see [guardrails.py](backend/guardrails.py). Real regulatory grounding: NPCI UPI Autopay rules
 (4-attempt cap, spacing, non-peak-hour windows) and RBI rules (₹15k AFA threshold, 24h pre-debit
 notice).
+
+## The checker agent — a real reflection pattern
+
+A fourth agent reviews every specialist decision worth reviewing — independent of whether the
+guardrail engine approved it. Guardrails only catch *policy* violations; a decision can pass every
+rule and still be wrong (a reasoning error, a fact the specialist got backwards). The checker is a
+second, separate LLM call that reads the case facts and the specialist's completed decision, and
+judges whether it actually holds up.
+
+Kept cheap on purpose, since this whole project runs on free-tier LLM quota: it reviews the
+*finished artifact*, never re-runs the specialist's whole multi-turn tool-calling loop, and only
+triggers on cases actually worth the cost (any `HARD_STOP` hit, a final `APPROVE_FIRST`, or high
+router severity) — not every case. On a flag, it can request exactly one bounded specialist retry
+(never re-checked again — no risk of an infinite check-retry-check loop) or escalate to a human.
+
+This isn't hypothetical — it caught a real mistake in this project's own data. A specialist
+reviewing an overdue receivable said a customer's promise-to-pay was **"missed,"** and proposed
+re-requesting the full outstanding amount. The real record said the promise was **kept**. The
+checker caught the contradiction, the specialist re-ran, and correctly proposed a reminder for just
+the genuine remaining balance instead — a real, verified self-correction, not a demo script. Full
+trace of this exact case, plus the checker's complete real-batch results (100% coverage of every
+case it flagged as worth reviewing across the real dataset, ~13% flag rate, zero cases needing
+human escalation), documented honestly in NOVELTY.md's agentic-pattern audit.
+
+## Observability and eval (Langfuse)
+
+Every LLM call — router, each specialist, the checker — is traced with
+[Langfuse](https://langfuse.com), via Pydantic AI's own OpenTelemetry instrumentation (no
+framework lock-in: switching observability backends later needs no rewrite). All 3 agent types for
+one case nest under a single trace, not 3 disconnected ones, so a full case's reasoning is
+readable end to end in one view.
+
+The checker's own verdict is surfaced as a real Langfuse **Score** (`checker_sound`,
+boolean, with the checker's actual reasoning as the comment) the moment it reviews a case — this
+turns the checker from an internal audit-trail detail into a queryable, dashboardable eval signal,
+filterable independent of this project's own database. Set `LANGFUSE_PUBLIC_KEY` /
+`LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` in `.env` to enable it (optional — the whole system runs
+identically, with zero code path changes, when it's unset).
 
 ## What's real vs. synthetic (stated upfront, not discovered)
 
@@ -90,7 +135,9 @@ matter what. So:
 ## Running it
 
 Requires Python 3.11+, Node 18+, and free-tier API keys for at least one of Gemini / Groq /
-OpenRouter (all no-card, no-billing).
+OpenRouter (all no-card, no-billing). Langfuse tracing/eval (`LANGFUSE_PUBLIC_KEY`/
+`LANGFUSE_SECRET_KEY`/`LANGFUSE_HOST` in `.env`) is optional — the system behaves identically,
+with zero code path changes, when unset.
 
 ```bash
 # 1. Backend setup
@@ -193,8 +240,10 @@ python stress_test.py --n 334 --seed 999   # ~1,000 cases, writes to data_stress
 |---|---|
 | [backend/models.py](backend/models.py) | Shared `Case` / `AttemptRecord` / `DecisionLogEntry` schemas |
 | [backend/guardrails.py](backend/guardrails.py) | The hardcoded compliance/policy engine — the ONE engine every agent, in both systems, is checked against |
-| [backend/pydantic_agents.py](backend/pydantic_agents.py) | **Primary architecture**: router agent + 3 specialist agents, on Pydantic AI |
+| [backend/pydantic_agents.py](backend/pydantic_agents.py) | **Primary architecture**: router agent + 3 specialist agents + the checker agent, on Pydantic AI, with Langfuse tracing/eval wired in |
 | [backend/run_batch_multiagent.py](backend/run_batch_multiagent.py) | Orchestrates the full batch run through the primary architecture |
+| [backend/run_checker_retroactive.py](backend/run_checker_retroactive.py) | Runs the checker agent against already-completed real cases, spending quota only on the review itself |
+| [backend/run_langfuse_sample.py](backend/run_langfuse_sample.py) | Generates real Langfuse trace/eval volume from a curated real-case sample, without touching the batch DB |
 | [backend/custom_case.py](backend/custom_case.py) / [backend/bulk_upload.py](backend/bulk_upload.py) | Live single-case and CSV/XLSX bulk submission, both through the primary architecture |
 | [backend/agent_loop.py](backend/agent_loop.py) | The original single-agent tool-calling loop — proven prior art, kept for direct comparison, no longer user-facing |
 | [backend/run_batch.py](backend/run_batch.py) | Orchestrates a batch run through the original single-agent system (its own separate DB) |
@@ -216,7 +265,12 @@ python -m pytest tests/ -v
 Covers the guardrail engine (NPCI/RBI rule enforcement, action-tier defaults), the
 customer-history/promise-to-pay tools, and the resume/reliability-tracking logic that decides which
 cases already have a trustworthy result (including a cross-check that the batch-runner's and the
-dashboard's clean-case counts agree with each other).
+dashboard's clean-case counts agree with each other). Also covers the checker agent's trigger
+rule, its bounded retry/escalate behavior, and a direct parity test proving `guardrails.py`
+enforcement is byte-identical between the router+specialist system and the original single-agent
+one. 88/88 passing. Langfuse is force-disabled for the whole test session
+([conftest.py](backend/tests/conftest.py)) so running tests never sends real data to a real
+Langfuse project.
 
 ## License
 

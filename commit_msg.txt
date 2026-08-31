@@ -1,0 +1,20 @@
+Make checker scoring continuous, update README with checker/Langfuse
+
+backend/pydantic_agents.py:
+- _run_checker_review now calls langfuse.score_current_trace() right after every checker
+  verdict, creating the checker_sound BOOLEAN score automatically inside the active
+  case-trace span (no manual traceId lookup, no separate backfill script needed for
+  future runs). Verified live: score count went 14 -> 15 with zero manual step.
+
+README.md:
+- Architecture diagram gets a real Stage 3 (checker agent).
+- New "The checker agent" section: what it does, why it's kept cheap, and the real
+  INV-0020 catch-and-fix story with honest real numbers (100% coverage of triggered
+  cases across the real 90-case dataset, ~13% flag rate, 0 escalations needed).
+- New "Observability and eval (Langfuse)" section: tracing via Pydantic AI's own OTel
+  instrumentation, the checker_sound Score, optional/zero-cost when unset.
+- Key files table: add run_checker_retroactive.py, run_langfuse_sample.py.
+- Tests section: note checker/parity coverage, conftest.py keeping test runs from
+  touching real Langfuse, 88/88 passing.
+
+Full test suite: 88/88 passing.

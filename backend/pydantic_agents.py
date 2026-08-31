@@ -637,6 +637,20 @@ def _run_checker_review(
 
     log_entries.append(_checker_log_entry(case, provider, verdict))
 
+    # Continuous eval (2026-09-01): every checker verdict scores its own trace as it happens,
+    # replacing the one-off backfill script (run_langfuse_sample.py's manual scoring pass) with
+    # the real thing -- this runs INSIDE the active case-trace span (see _case_trace_span), so
+    # score_current_trace() attaches to the correct trace with no manual traceId lookup, and
+    # (unlike the backfill) is scoring the SAME run that just produced the verdict, so the
+    # "was this trace actually reviewed" honesty concern that excluded 2 cases from the backfill
+    # can't arise here by construction.
+    if _LANGFUSE_ENABLED:
+        langfuse.score_current_trace(
+            name="checker_sound", value=1.0 if verdict.sound else 0.0, data_type="BOOLEAN",
+            comment=(verdict.concern or "Checker reviewed the specialist's decision and found it sound.")[:500],
+            metadata={"case_id": case.case_id, "recommended_action": verdict.recommended_action},
+        )
+
     if verdict.sound:
         return log_entries
 
