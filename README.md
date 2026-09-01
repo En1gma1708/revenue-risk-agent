@@ -109,14 +109,31 @@ Every LLM call — router, each specialist, the checker — is traced with
 [Langfuse](https://langfuse.com), via Pydantic AI's own OpenTelemetry instrumentation (no
 framework lock-in: switching observability backends later needs no rewrite). All 3 agent types for
 one case nest under a single trace, not 3 disconnected ones, so a full case's reasoning is
-readable end to end in one view.
+readable end to end in one view. Set `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` /
+`LANGFUSE_HOST` in `.env` to enable it (optional — the whole system runs identically, with zero
+code path changes, when it's unset).
 
-The checker's own verdict is surfaced as a real Langfuse **Score** (`checker_sound`,
-boolean, with the checker's actual reasoning as the comment) the moment it reviews a case — this
-turns the checker from an internal audit-trail detail into a queryable, dashboardable eval signal,
-filterable independent of this project's own database. Set `LANGFUSE_PUBLIC_KEY` /
-`LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` in `.env` to enable it (optional — the whole system runs
-identically, with zero code path changes, when it's unset).
+On top of tracing, 5 deterministic evals run as real Langfuse **Scores** — no separate
+LLM-as-judge call for any of them, each is either a comparison against already-known ground truth
+or an independent re-run of a deterministic function, per the eval skill's own "don't default to
+an LLM judge" guidance. Verified against the full 95-case dataset (some cases skipped by real
+free-tier rate limits during the run, a known constraint documented below, not a code issue):
+
+| Score | What it checks | Real result |
+|---|---|---|
+| `router_surface_correct` | Did the router hand off to the right specialist for the case's real surface? | **80/80 — 100%** |
+| `guardrail_consistent` | Independently re-running `guardrails.py`'s CURRENT rule table against each persisted decision — does it still agree? Catches silent policy drift, not just build-time correctness. | **114/114 consistent — 0 mismatches** (1 case excluded as unverifiable — see `run_guardrail_audit.py`'s docstring for the honest reason: an old record is missing a field this one specific rule needs, so it can't be re-checked, not that it failed) |
+| `checker_sound` | The checker agent's own verdict on a specialist's decision, surfaced as a queryable score instead of only a DB row | 94 traces reviewed — 81 sound / 13 flagged (~14%); a separate, larger DB-backed run (100% coverage of every case worth reviewing) put this at ~13% — see below |
+| `escalation_category` | How each case actually resolved: self-escalated / guardrail-approved / guardrail-hard-stopped / autonomous | 80 scored — 46 self-escalated (57.5%), 32 guardrail-approved, 2 autonomous |
+| `ptp_status_consistent` | For receivables cases, does the specialist's own reasoning agree with the real recorded promise-to-pay status? (The exact class of bug the checker caught once — see below.) | **6/6 consistent** (narrow by design — only scored when the reasoning unambiguously says "missed" or "kept") |
+
+`router_surface_correct` / `escalation_category` / `ptp_status_consistent` are computed inline,
+scoring every new case as it runs. `guardrail_consistent` is deliberately a separate, retroactive
+audit script (`run_guardrail_audit.py`) rather than inline — re-running the guardrail check
+immediately after it just ran, on the same inputs, in the same process, would be tautological
+(always matches, proves nothing). Its real value is re-verifying *persisted* decisions later,
+against whatever the rule table says *now* — the check that actually defends this project's core
+compliance claim over time, not just on day one.
 
 ## What's real vs. synthetic (stated upfront, not discovered)
 
@@ -243,7 +260,8 @@ python stress_test.py --n 334 --seed 999   # ~1,000 cases, writes to data_stress
 | [backend/pydantic_agents.py](backend/pydantic_agents.py) | **Primary architecture**: router agent + 3 specialist agents + the checker agent, on Pydantic AI, with Langfuse tracing/eval wired in |
 | [backend/run_batch_multiagent.py](backend/run_batch_multiagent.py) | Orchestrates the full batch run through the primary architecture |
 | [backend/run_checker_retroactive.py](backend/run_checker_retroactive.py) | Runs the checker agent against already-completed real cases, spending quota only on the review itself |
-| [backend/run_langfuse_sample.py](backend/run_langfuse_sample.py) | Generates real Langfuse trace/eval volume from a curated real-case sample, without touching the batch DB |
+| [backend/run_langfuse_sample.py](backend/run_langfuse_sample.py) | Generates real Langfuse trace/eval volume (curated 16-case sample by default, `--all` for the full 95), without touching the batch DB |
+| [backend/run_guardrail_audit.py](backend/run_guardrail_audit.py) | Retroactively re-verifies persisted decisions against the CURRENT guardrail rule table, scored as `guardrail_consistent` |
 | [backend/custom_case.py](backend/custom_case.py) / [backend/bulk_upload.py](backend/bulk_upload.py) | Live single-case and CSV/XLSX bulk submission, both through the primary architecture |
 | [backend/agent_loop.py](backend/agent_loop.py) | The original single-agent tool-calling loop — proven prior art, kept for direct comparison, no longer user-facing |
 | [backend/run_batch.py](backend/run_batch.py) | Orchestrates a batch run through the original single-agent system (its own separate DB) |

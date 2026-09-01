@@ -43,3 +43,6 @@ Thumbs.db
 .agents/
 .claude/
 skills-lock.json
+
+# Scratch run logs from local eval/sample runs -- not build artifacts, just raw stdout.
+*_run.log

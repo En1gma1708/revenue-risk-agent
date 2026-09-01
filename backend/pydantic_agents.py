@@ -720,6 +720,90 @@ def _set_case_trace_output(decision: "RoutingDecision", case: Case, log_entries:
     })
 
 
+def _specialist_final_entry(log_entries: list[DecisionLogEntry]) -> Optional[DecisionLogEntry]:
+    """The specialist's OWN last decision entry -- specifically excluding the checker's own
+    appended entries (checker_approved/checker_flagged). Needed because after _run_checker_review
+    runs, log_entries[-1] is often the CHECKER's entry, not the specialist's -- self-escalation
+    categorization and PTP correctness are both about what the SPECIALIST decided, so blindly
+    taking the trailing entry would misattribute the checker's own LOG_ONLY/APPROVE_FIRST tier to
+    the specialist's behavior."""
+    for entry in reversed(log_entries):
+        if entry.outcome not in ("checker_approved", "checker_flagged"):
+            return entry
+    return None
+
+
+def _score_case_evals(case: Case, decision: "RoutingDecision", log_entries: list[DecisionLogEntry]) -> None:
+    """Three deterministic evals, scored together in one pass, right alongside
+    _set_case_trace_output -- none need a new LLM judge call, all compare against data the system
+    already produces (2026-09-01, scoped the evening before -- see DEVLOG.md for why each was
+    chosen and why none needed a separate implementation round). No-op when Langfuse isn't
+    configured.
+
+    1. router_surface_correct (BOOLEAN): does the router's own classification match the case's
+       real, always-known surface? A router that never completed a handoff (decision.surface ==
+       "unknown") scores False -- failing to classify at all is not a correct classification.
+    2. escalation_category (CATEGORICAL): self_escalated / guardrail_approve_first /
+       guardrail_hard_stop / autonomous / log_only / no_decision -- surfaces the real 59%
+       self-escalation finding (2026-08-31) as filterable Langfuse data instead of only a DEVLOG
+       number. Computed from the SPECIALIST's own final entry (see _specialist_final_entry),
+       never the checker's.
+    3. ptp_status_consistent (BOOLEAN, receivables-only): best-effort keyword check -- does the
+       specialist's own reasoning text agree with the real, recorded ptp.status ("missed" vs
+       "kept")? This is the exact class of error the checker caught once for real (INV-0020).
+       Deliberately narrow and explicitly a heuristic, not a clean structured comparison: the
+       specialist's belief about PTP status lives only in free-form reasoning prose, not a
+       dedicated field, so this does substring matching on "missed"/"kept" rather than parsing
+       real structured output. Only scored when a real PTP exists AND the reasoning text actually
+       mentions one of those two words -- silently skipped otherwise rather than guessing on
+       reasoning that doesn't address PTP status at all."""
+    if not _LANGFUSE_ENABLED:
+        return
+
+    # 1. Router classification accuracy
+    router_correct = decision.surface == case.surface.value
+    langfuse.score_current_trace(
+        name="router_surface_correct", value=1.0 if router_correct else 0.0, data_type="BOOLEAN",
+        metadata={"case_id": case.case_id, "routed_surface": decision.surface, "real_surface": case.surface.value},
+    )
+
+    final = _specialist_final_entry(log_entries)
+    if final is not None:
+        # 2. Self-escalation vs. guardrail-driven categorization
+        if final.outcome == "escalated_to_human":
+            category = "self_escalated"
+        elif final.outcome == "queued_for_human_approval":
+            category = "guardrail_approve_first"
+        elif final.action_tier == ActionTier.HARD_STOP:
+            category = "guardrail_hard_stop"
+        elif final.action_tier == ActionTier.AUTONOMOUS:
+            category = "autonomous"
+        elif final.action_tier == ActionTier.LOG_ONLY:
+            category = "log_only"
+        else:
+            category = "no_decision"
+        langfuse.score_current_trace(
+            name="escalation_category", value=category, data_type="CATEGORICAL",
+            metadata={"case_id": case.case_id},
+        )
+
+        # 3. PTP reasoning correctness (receivables only, best-effort keyword check)
+        if (case.surface == Surface.OVERDUE_RECEIVABLE and case.receivable_details
+                and case.receivable_details.ptp is not None):
+            real_status = case.receivable_details.ptp.status.value  # "kept" / "missed" / "pending" / "renegotiated"
+            reasoning_lower = final.reasoning.lower()
+            said_missed = "missed" in reasoning_lower
+            said_kept = "kept" in reasoning_lower
+            if said_missed != said_kept:  # exactly one mentioned -- otherwise ambiguous, skip
+                claimed_status = "missed" if said_missed else "kept"
+                consistent = claimed_status == real_status
+                langfuse.score_current_trace(
+                    name="ptp_status_consistent", value=1.0 if consistent else 0.0, data_type="BOOLEAN",
+                    comment=f"specialist said '{claimed_status}', real PTP status is '{real_status}'",
+                    metadata={"case_id": case.case_id},
+                )
+
+
 def run_case_via_orchestrator(
     case: Case, history: AttemptHistory, provider: str,
     all_cases: Optional[list[Case]] = None, api_key: Optional[str] = None,
@@ -778,6 +862,7 @@ def run_case_via_orchestrator(
             entry = _escalate_routing_failure(case, reason, provider)
             decision = RoutingDecision(surface="unknown", severity="unknown", reason=reason)
             _set_case_trace_output(decision, case, [entry])
+            _score_case_evals(case, decision, [entry])
             return decision, [entry]
 
         decision, log_entries = deps.handoff_result
@@ -787,6 +872,7 @@ def run_case_via_orchestrator(
                                            history, all_cases or [case])
 
         _set_case_trace_output(decision, case, log_entries)
+        _score_case_evals(case, decision, log_entries)
         return decision, log_entries
 
 
